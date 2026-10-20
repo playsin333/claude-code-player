@@ -58,7 +58,7 @@ test('the band shows the cleaned track', async ($, on) => {
   await start(
     on,
     [
-      line({ app: 'chrome.exe', artist: '', title: 'Kendrick Lamar - Not Like Us (Official Video)', isPlaying: true }),
+      line({ app: 'chrome.exe', artist: '', title: 'Lil Peep - Gym Class (Official Video)', isPlaying: true }),
     ],
     clock,
   )
@@ -66,8 +66,8 @@ test('the band shows the cleaned track', async ($, on) => {
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const row = await ui.find({ type: 'Text', text: /Not Like Us/ })
-  expect(row?.text).toBe('▂▅▃  Kendrick Lamar — Not Like Us')
+  const row = await ui.find({ type: 'Text', text: /Gym Class/ })
+  expect(row?.text).toBe('▂▅▃  Lil Peep — Gym Class')
   await ui.unmount()
 })
 
@@ -88,7 +88,7 @@ test('/player line moves the player to the status line', async ($, on) => {
   const clock = mock.clock(on)
   const statuses = await start(
     on,
-    [line({ app: 'Spotify.exe', artist: 'Kendrick Lamar', title: 'Not Like Us', isPlaying: true })],
+    [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })],
     clock,
   )
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -96,10 +96,10 @@ test('/player line moves the player to the status line', async ($, on) => {
 
   const answer = await $.command.run(run('line'))
   expect(answer.text).toContain('строчкой')
-  expect(statuses.at(-1)).toContain('Kendrick Lamar — Not Like Us')
+  expect(statuses.at(-1)).toContain('Lil Peep — Gym Class')
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /Not Like Us/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -107,7 +107,7 @@ test('a mode saved earlier is used from the start', async ($, on) => {
   const clock = mock.clock(on)
   await start(
     on,
-    [line({ app: 'Spotify.exe', artist: 'Kendrick Lamar', title: 'Not Like Us', isPlaying: true })],
+    [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })],
     clock,
     { mode: 'off' },
   )
@@ -115,7 +115,7 @@ test('a mode saved earlier is used from the start', async ($, on) => {
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /Not Like Us/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
   await ui.unmount()
 })
 

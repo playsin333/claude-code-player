@@ -9,13 +9,13 @@ Now-playing mod for Claude Code: shows the current track (artist — title) from
 Над полем ввода, по центру:
 
 ```
-                  ▂▅▃  Kendrick Lamar — Not Like Us
+                  ▂▅▃  Lil Peep — Gym Class
 ```
 
 И строчкой рядом с выбором модели:
 
 ```
- ▂▅▃  Kendrick Lamar — Not Like Us
+ ▂▅▃  Lil Peep — Gym Class
 ```
 
 Пока трек играет, эквалайзер прыгает. На паузе он замирает (`▁▁▁`), а текст тускнеет. Если ничего не играет, плеер не показывается.
