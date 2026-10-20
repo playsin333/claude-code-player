@@ -1,0 +1,6 @@
+{
+  "name": "claude-code-player",
+  "description": "Now-playing player for Claude Code",
+  "owner": { "name": "playsin333" },
+  "plugins": [{ "name": "now-playing", "source": "./" }]
+}
