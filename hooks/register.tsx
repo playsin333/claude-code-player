@@ -36,7 +36,7 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.4.0'
+const VERSION = '1.4.1'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -51,8 +51,12 @@ const LYRICS_MIN = 20
 const LYRICS_MAX = 56
 const BAND_OTHERS = 30
 const LRCLIB = 'https://lrclib.net/api/search'
-// How far a found track's length may be from the playing one's, in seconds.
+// How far a found track's length may be from the playing one's, in seconds:
+// the nearest within SLACK first, and none past FAR, another version's timing.
 const DURATION_SLACK_S = 3
+const DURATION_FAR_S = 10
+// A failed lyrics search is tried again after this long, not on every report.
+const LYRICS_RETRY_MS = 60_000
 const RESTART_MS = 3000
 const MAX_FAILED_STARTS = 5
 const STDERR_KEPT = 300
@@ -240,28 +244,29 @@ const searchLrclib = async ($: EngineInterface, query: Record<string, string>): 
   return Array.isArray(hits) ? (hits as LrclibHit[]) : []
 }
 
-// The synced lyrics of the hit nearest the track's length, or of the first
-// hit that has any.
+// The synced lyrics of the hit nearest the track's length; of the first hit
+// with any when the length is unknown.
 const bestLines = (hits: readonly LrclibHit[], duration: number | undefined): LyricLine[] => {
   const synced = hits.filter(hit => typeof hit.syncedLyrics === 'string' && hit.syncedLyrics !== '')
-  const near =
-    duration === undefined || duration < 1
-      ? undefined
-      : synced.find(hit => Math.abs((hit.duration ?? 0) - duration) <= DURATION_SLACK_S)
-  return parseLrc((near ?? synced[0])?.syncedLyrics ?? '')
+  const within = (slack: number) => synced.find(hit => Math.abs((hit.duration ?? 0) - (duration ?? 0)) <= slack)
+  const hit = duration === undefined || duration < 1 ? synced[0] : (within(DURATION_SLACK_S) ?? within(DURATION_FAR_S))
+  return parseLrc(hit?.syncedLyrics ?? '')
 }
 
 const lyricsKey = (one: Track): string => `${one.artist}\n${one.title}`
 
 // Lyrics found this session, by track, so a track played again is not searched again.
 const lyricsFound = new Map<string, LyricLine[]>()
+// When the last search failed, so a dead network is not asked on every report.
+let lyricsFailedAt = -Infinity
 
 // Looks the shown track's lyrics up, once per track, while lyrics are on.
 const findLyrics = async ($: EngineInterface): Promise<void> => {
   const [chosen, playing, known] = await Promise.all([read($, settings), read($, track), read($, lyrics)])
   if (chosen.lyrics === 'off' || playing === null) return
   const key = lyricsKey(playing)
-  if (known?.key === key) return
+  const isRetry = known?.status === 'failed' && (await $.clock.now()) - lyricsFailedAt >= LYRICS_RETRY_MS
+  if (known?.key === key && !isRetry) return
 
   let found: FoundLyrics
   const cached = lyricsFound.get(key)
@@ -279,6 +284,7 @@ const findLyrics = async ($: EngineInterface): Promise<void> => {
       lyricsFound.set(key, lines)
       found = { key, status: lines.length > 0 ? 'found' : 'missing', lines }
     } catch (thrown) {
+      lyricsFailedAt = await $.clock.now()
       found = { key, status: 'failed', lines: [], detail: thrown instanceof Error ? thrown.message : String(thrown) }
     }
   }
@@ -369,12 +375,16 @@ const watch = async ($: EngineInterface): Promise<void> => {
             continue
           }
           if (message.sessions === undefined) continue
-          const receivedAt = await $.clock.now()
-          // A position with no report time counts from now.
-          const reported = message.sessions.map(one => ({
-            ...cleanTrack(one),
-            updatedAt: (one.updatedAt ?? 0) > 0 ? one.updatedAt : receivedAt,
-          }))
+          const [receivedAt, before] = await Promise.all([$.clock.now(), read($, sessions)])
+          // A position with no report time counts from when it was first seen,
+          // not from each report: a report about another app must not reset it.
+          const reported = message.sessions.map(one => {
+            const clean = cleanTrack(one)
+            const seenBefore = before.find(
+              was => was.app === clean.app && was.title === clean.title && was.position === clean.position,
+            )
+            return { ...clean, updatedAt: (one.updatedAt ?? 0) > 0 ? one.updatedAt : (seenBefore?.updatedAt ?? receivedAt) }
+          })
           await update($, error, () => null)
           await update($, now, () => receivedAt)
           await update($, sessions, () => reported)
@@ -622,7 +632,7 @@ export const register: Register = on => {
                   `${sung.detail === undefined ? '' : ` (${sung.detail})`}`
           }`,
           '',
-          `Медиасессии Windows: ${all.length === 0 ? 'нет' : ''}`,
+          all.length === 0 ? 'Медиасессии Windows: нет' : 'Медиасессии Windows:',
           ...listed,
           '',
           'Полоса над полем ввода:',

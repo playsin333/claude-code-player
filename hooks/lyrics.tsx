@@ -100,8 +100,9 @@ const Lyrics: ClientModule<LyricsProps, LyricsState> = (props, surface) => {
       </Text>
     )
   }
+  // A line longer than the room keeps its newest words in view.
   return (
-    <Text size={props.size} dimColor={!props.isPlaying} wrap="truncate-end">
+    <Text size={props.size} dimColor={!props.isPlaying} wrap="truncate-start">
       {words.map(word => (
         <Text dimColor={isFresh(word)}>{word.text}</Text>
       ))}

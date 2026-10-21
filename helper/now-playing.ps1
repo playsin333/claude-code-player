@@ -27,16 +27,18 @@ try {
         $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
     } | Select-Object -First 1
 
-    function Await($operation, [Type]$resultType) {
+    # Waits for a WinRT operation, at most $timeoutMs: an app that never
+    # answers costs its own session, not the whole player.
+    function Await($operation, [Type]$resultType, [int]$timeoutMs = 3000) {
         $task = $asTaskGeneric.MakeGenericMethod($resultType).Invoke($null, @($operation))
-        $task.Wait(-1) | Out-Null
+        if (-not $task.Wait($timeoutMs)) { throw "no answer in $timeoutMs ms" }
         $task.Result
     }
 
     $null = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media.Control, ContentType = WindowsRuntime]
     $managerType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]
     $propertiesType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]
-    $manager = Await ($managerType::RequestAsync()) $managerType
+    $manager = Await ($managerType::RequestAsync()) $managerType 15000
 }
 catch {
     Write-Line @{ error = "media sessions unavailable: $($_.Exception.Message)" }
@@ -50,6 +52,20 @@ foreach ($file in @($commandFile, $takenFile)) {
     if (Test-Path -LiteralPath $file) { [IO.File]::Delete($file) }
 }
 Write-Line @{ commands = $commandFile }
+
+# The Claude process that started the script: when it is gone, so is the
+# script, even after a crash that killed no children. $null when unknown.
+$parentId = $null
+try {
+    $parentId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
+}
+catch {
+}
+
+function Test-ParentGone {
+    if (-not $parentId) { return $false }
+    -not (Get-Process -Id $parentId -ErrorAction SilentlyContinue)
+}
 
 function Get-Timeline($session) {
     try {
@@ -184,6 +200,9 @@ while ($true) {
             }
         }
     }
+
+    # Every ten seconds or so.
+    if ($step % 100 -eq 99 -and (Test-ParentGone)) { exit 0 }
 
     $step += 1
     Start-Sleep -Milliseconds 100

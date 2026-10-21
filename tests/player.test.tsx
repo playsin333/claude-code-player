@@ -231,7 +231,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.4.0')
+  expect(answer.text).toContain('now-playing 1.4.1')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -563,6 +563,8 @@ test('with lyrics on, a line comes in word by word as it is sung', async ($, on)
 
   await both(clock, ui, 2_000)
   expect(await words()).toEqual(['раз·'])
+  // A line longer than its room keeps the newest words in view.
+  expect((await ui.find({ type: 'Text', in: 'lyrics' }))?.props.wrap).toBe('truncate-start')
   await both(clock, ui, 500)
   expect(await words()).toEqual(['раз', 'два·'])
   await both(clock, ui, 500)
@@ -630,4 +632,50 @@ test('/player lyrics turns them on and says where they come from', async ($, on)
   const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
   expect((await panel.find({ key: 'lyrics-on' }))?.props.variant).toBe('primary')
   await panel.unmount()
+})
+
+test('lyrics of another version, far off in length, are not used', async ($, on) => {
+  const clock = mock.clock(on)
+  lrclib(on, [{ duration: 300, syncedLyrics: LRC }])
+  await start(on, [COMMANDS, timed(0)], clock, LYRICS_ON)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  expect((await $.command.run(run('debug'))).text).toContain('Текст песни: не найден на lrclib.net')
+})
+
+test('a failed lyrics search is tried again a minute later, not on every report', async ($, on) => {
+  const clock = mock.clock(on)
+  let asks = 0
+  on('http.fetch', () => {
+    asks += 1
+    return asks === 1
+      ? { value: { status: 503, ok: false, headers: {}, text: '' } }
+      : { value: { status: 200, ok: true, headers: {}, text: JSON.stringify([{ duration: 225, syncedLyrics: LRC }]) } }
+  })
+  await start(on, [COMMANDS, timed(0), 1_000, timed(0), 60_000, timed(0)], clock, LYRICS_ON)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect((await $.command.run(run('debug'))).text).toContain('Текст песни: ошибка (lrclib.net ответил 503)')
+
+  await clock.advance(1_000)
+  expect(asks).toBe(1)
+  await clock.advance(60_000)
+  expect(asks).toBe(2)
+  expect((await $.command.run(run('debug'))).text).toContain('Текст песни: найден, строк: 3')
+})
+
+test('an app that reports no time keeps counting through reports about other apps', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const untimed = { app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true, position: 0, duration: 200, updatedAt: 0 }
+  const statuses = await start(
+    on,
+    [COMMANDS, report(untimed), 5_000, report(untimed, { app: 'Chrome', artist: '', title: 'Серия 3', isPlaying: false })],
+    clock,
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  await clock.advance(5_100)
+  expect(statuses.at(-1)).toContain('Lil Peep — Gym Class  0:05 / 3:20')
 })
