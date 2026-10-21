@@ -44,6 +44,10 @@ const COMMANDS = `${JSON.stringify({ commands: COMMAND_FILE })}\r\n`
 // A minute into a 3:45 track, as Windows reported it at `at`.
 const TIME = { type: 'Text', text: /\d:\d\d \/ / } as const
 
+// The live parts the band hands the surface to run: the equalizer and the clock.
+const LIVE_EQUALIZER = { ...EQUALIZER, in: 'equalizer' } as const
+const LIVE_TIME = { ...TIME, in: 'clock' } as const
+
 const timed = (at: number, isPlaying = true): string =>
   line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying, position: 60, duration: 225, updatedAt: at })
 
@@ -95,8 +99,8 @@ test('the band shows the cleaned track, small and centered by default', async ($
   const text = await ui.find({ type: 'Text', text: /Gym Class/ })
   expect(text?.text).toBe('Lil Peep — Gym Class')
   expect(text?.props.size).toBe('caption')
-  expect((await ui.find(EQUALIZER))?.text).toBe('▂▅▃')
-  expect((await ui.find(EQUALIZER))?.props.mono).toBe(true)
+  expect((await ui.find(LIVE_EQUALIZER))?.text).toBe('▂▅▃')
+  expect((await ui.find(LIVE_EQUALIZER))?.props.mono).toBe(true)
   expect((await ui.find({ key: 'player' }))?.props.justifyContent).toBe('center')
   await ui.unmount()
 })
@@ -122,7 +126,7 @@ test('a JSON line split across pieces is still read', async ($, on) => {
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /Положение/ }))?.text).toBe('Скриптонит — Положение')
-  expect((await ui.find(EQUALIZER))?.text).toBe('▁▁▁')
+  expect((await ui.find(LIVE_EQUALIZER))?.text).toBe('▁▁▁')
   await ui.unmount()
 })
 
@@ -227,7 +231,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.3.0')
+  expect(answer.text).toContain('now-playing 1.3.1')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -285,14 +289,15 @@ test('the band shows the buttons and a time that runs while the track plays', as
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await ui.find(TIME))?.text).toBe('1:00 / 3:45')
+  expect((await ui.find(LIVE_TIME))?.text).toBe('1:00 / 3:45')
   expect((await ui.find({ key: 'previous' }))?.props.label).toBe('⏮\uFE0E')
   expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('⏸\uFE0E')
   expect((await ui.find({ key: 'next' }))?.props.label).toBe('⏭\uFE0E')
 
-  // The time moves with the animation, every 300 ms.
+  // The clock asks for the time on the surface's own frame clock.
   await clock.advance(5_100)
-  expect((await ui.find(TIME))?.text).toBe('1:05 / 3:45')
+  await ui.advance(500)
+  expect((await ui.find(LIVE_TIME))?.text).toBe('1:05 / 3:45')
   expect(statuses.at(-1)).toContain('Lil Peep — Gym Class  1:05 / 3:45')
   await ui.unmount()
 })
@@ -305,7 +310,7 @@ test('a paused track keeps its time and offers play', async ($, on) => {
   await clock.advance(5_000)
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await ui.find(TIME))?.text).toBe('1:00 / 3:45')
+  expect((await ui.find(LIVE_TIME))?.text).toBe('1:00 / 3:45')
   expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('▶\uFE0E')
   await ui.unmount()
 })
@@ -351,7 +356,7 @@ test('/player buttons and time turn them off', async ($, on) => {
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ key: 'next' })).toBeUndefined()
-  expect(await ui.find(TIME)).toBeUndefined()
+  expect(await ui.find({ key: 'clock' })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
   await ui.unmount()
 
@@ -370,7 +375,7 @@ test('the band draws its buttons and time in the terminal too', async ($, on) =>
 
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
-  expect((await ui.find(TIME))?.text).toBe('1:00 / 3:45')
+  expect((await ui.find(LIVE_TIME))?.text).toBe('1:00 / 3:45')
   expect((await ui.find({ key: 'next' }))?.props.plain).toBe(true)
   await ui.unmount()
 })
@@ -461,4 +466,46 @@ test('on the right the buttons sit at the edge, after the time', async ($, on) =
     'controls',
   )
   await left.unmount()
+})
+
+test('while the track plays the band is not drawn again, only when it changes', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const at = (position: number, updatedAt: number): string =>
+    line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true, position, duration: 225, updatedAt })
+  // A report a second later that keeps time, then a seek to two minutes.
+  await start(on, [COMMANDS, at(60, 1_000_000), 1_000, at(61, 1_001_000), 1_000, at(120, 1_002_000)], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const drawn = async (): Promise<number> =>
+    Number(((await $.command.run(run("debug"))).text ?? "").match(/плеер нарисован: (\d+)/)?.[1])
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const first = await drawn()
+  expect((await ui.find(LIVE_EQUALIZER))?.text).toBe('▂▅▃')
+
+  await clock.advance(1_500)
+  await ui.advance(600)
+  expect(await drawn()).toBe(first)
+  expect((await ui.find(LIVE_EQUALIZER))?.text).toBe('▃▇▂')
+  expect((await ui.find(LIVE_TIME))?.text).toBe('1:01 / 3:45')
+
+  await clock.advance(1_000)
+  await ui.advance(500)
+  expect(await drawn()).toBeGreaterThan(first)
+  expect((await ui.find(LIVE_TIME))?.text).toBe('2:00 / 3:45')
+  expect((await $.command.run(run('debug'))).text).toMatch(/часы спрашивали время: [1-9]/)
+  await ui.unmount()
+})
+
+test('a surface that runs no live parts draws the equalizer and time itself', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, timed(0)], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'vscode' })
+  expect((await ui.find(EQUALIZER))?.text).toBe('▂▅▃')
+  expect((await ui.find(TIME))?.text).toBe('1:00 / 3:45')
+  expect(await ui.find({ key: 'clock' })).toBeUndefined()
+  await ui.unmount()
 })

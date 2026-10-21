@@ -1,32 +1,35 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BottomPlace, PlayerSettings, Session, Switch, TextSize, TopPlace, Track } from '../types'
+import type { BottomPlace, PlayerSettings, Session, Source, Switch, TextSize, TopPlace, Track } from '../types'
+
+import { EQUALIZER, EQUALIZER_PAUSED, FRAME_MS } from './equalizer'
 
 const DEFAULTS: PlayerSettings = { top: 'center', size: 'small', bottom: 'model', controls: 'on', time: 'on', hidden: [] }
 
 const sessions = atom({ plugin: 'now-playing', key: 'sessions' } as const, [])
 const track = atom({ plugin: 'now-playing', key: 'track' } as const, null)
+const sources = atom({ plugin: 'now-playing', key: 'sources' } as const, [])
 const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAULTS)
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.3.0'
+const VERSION = '1.3.1'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
 const SWITCHES: readonly Switch[] = ['off', 'on']
-// No ▄: Windows draws it from another font than the rest, a frame of another width.
-const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▃▆▂', '▆▂▃']
-const EQUALIZER_PAUSED = '▁▁▁'
-const FRAME_MS = 300
 const LINE_MAX = 60
+// How far the app's report may stray from the time counted on before it is shown.
+const DRIFT_S = 2
 const SOURCE_MAX = 32
 const RESTART_MS = 3000
 const MAX_FAILED_STARTS = 5
 const STDERR_KEPT = 300
 
 const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const
+// The surfaces that run a `Client`; the others draw one as nothing.
+const LIVE_SURFACES: readonly string[] = ['terminal', 'desktop']
 const TEXT_SIZE = { small: 'caption', normal: 'body' } as const
 
 const TOP_LABELS: Record<TopPlace, string> = { off: 'выкл', left: 'слева', center: 'по центру', right: 'справа' }
@@ -97,15 +100,29 @@ const clockText = (seconds: number): string => {
   return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
 }
 
-// "1:23 / 3:45" at `at`, counting on from the app's last report while it plays;
-// undefined when the app reports no length.
+// Seconds into the track at `at`, counting on from the app's last report while it plays.
+const positionAt = (one: Track, at: number): number =>
+  (one.position ?? 0) + (one.isPlaying ? Math.max(0, at - (one.updatedAt ?? at)) / 1000 : 0)
+
+// "1:23 / 3:45" at `at`; undefined when the app reports no length.
 export const timeText = (one: Track, at: number): string | undefined => {
   const duration = one.duration ?? 0
   if (!(duration >= 1)) return undefined
-  const since = one.isPlaying ? Math.max(0, at - (one.updatedAt ?? at)) / 1000 : 0
-  const position = Math.min(duration, Math.max(0, (one.position ?? 0) + since))
+  const position = Math.min(duration, Math.max(0, positionAt(one, at)))
   return `${clockText(position)} / ${clockText(duration)}`
 }
+
+// Whether `next` shows as `shown` does at `at`: the same track and state, and
+// a time no more than DRIFT_S off.
+const isSame = (shown: Track | null, next: Track | null, at: number): boolean =>
+  shown === null || next === null
+    ? shown === next
+    : shown.app === next.app &&
+      shown.artist === next.artist &&
+      shown.title === next.title &&
+      shown.isPlaying === next.isPlaying &&
+      (shown.duration ?? 0) === (next.duration ?? 0) &&
+      Math.abs(positionAt(shown, at) - positionAt(next, at)) < DRIFT_S
 
 const lineText = (one: Track, at: number, isTimed: boolean): string => {
   const time = isTimed ? timeText(one, at) : undefined
@@ -152,12 +169,19 @@ export const pick = (all: readonly Session[], hidden: readonly string[], lastApp
   return [last, current, ...visible].find(one => one?.isPlaying === true) ?? last ?? current ?? visible[0]
 }
 
-// Shows the session `pick` chooses from the ones last reported.
+// Shows the session `pick` chooses from the ones last reported. Leaves `track`
+// alone while it would show the same, so what draws it is not drawn again.
 const select = async ($: EngineInterface): Promise<void> => {
   const [all, chosen, shown] = await Promise.all([read($, sessions), read($, settings), read($, track)])
   const next = pick(all, chosen.hidden, shown?.app) ?? null
-  await update($, track, () => next)
+  if (!isSame(shown, next, await $.clock.now())) await update($, track, () => next)
   await refreshStatus($)
+}
+
+// Lists the reported apps for the panel, leaving the list alone while it stays the same.
+const listSources = async ($: EngineInterface, all: readonly Session[]): Promise<void> => {
+  const listed: Source[] = all.map(one => ({ app: one.app, text: trackText(one) }))
+  if (JSON.stringify(listed) !== JSON.stringify(await read($, sources))) await update($, sources, () => listed)
 }
 
 const choose = async ($: EngineInterface, change: Partial<PlayerSettings>): Promise<PlayerSettings> => {
@@ -229,6 +253,7 @@ const watch = async ($: EngineInterface): Promise<void> => {
           await update($, error, () => null)
           await update($, now, () => receivedAt)
           await update($, sessions, () => reported)
+          await listSources($, reported)
           await select($)
         }
       }
@@ -243,6 +268,7 @@ const watch = async ($: EngineInterface): Promise<void> => {
       await update($, error, () => `помощник не запустился или сразу закрылся${detail}. Пока плеер работает только на Windows.`)
     }
     await update($, sessions, () => [])
+    await listSources($, [])
     await select($)
     await $.clock.sleep(RESTART_MS)
   }
@@ -317,6 +343,7 @@ const seen = {
   bandSkipped: '—',
   bandFailure: '—',
   panelDrawn: 0,
+  clockAsks: 0,
   lastCommand: '—',
   lastAnswer: '—',
   controlFailure: '—',
@@ -439,11 +466,13 @@ export const register: Register = on => {
         ]
         return `  ${appName(one.app)} (${one.app}), ${marks.join(', ')}: ${trackText(one)}`
       })
+      // The app's own last report, which `track` follows only when it strays.
+      const raw = all.find(one => one.app === playing?.app && one.title === playing.title) ?? playing
       const timeline =
-        playing === null
+        raw === null
           ? '—'
-          : `позиция ${playing.position ?? '—'} с, длина ${playing.duration ?? '—'} с, ` +
-            `сообщено ${Math.round((at - (playing.updatedAt ?? at)) / 1000)} с назад`
+          : `позиция ${raw.position ?? '—'} с, длина ${raw.duration ?? '—'} с, ` +
+            `сообщено ${Math.round((at - (raw.updatedAt ?? at)) / 1000)} с назад`
       return {
         text: [
           `now-playing ${VERSION}`,
@@ -463,6 +492,7 @@ export const register: Register = on => {
           `  под плеером: ${seen.bandBelow}`,
           `  последний раз не рисовал, потому что: ${seen.bandSkipped}`,
           `  ошибка: ${seen.bandFailure}`,
+          `  часы спрашивали время: ${seen.clockAsks} раз`,
           '',
           `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
           '',
@@ -489,15 +519,15 @@ export const register: Register = on => {
   on('ui.render', { component: 'CommandOutput', props: { command: 'player' } }, async ($, e, next) => {
     if (e.props.args.trim() !== '' || e.props.isErrored) return next(e)
 
-    const [chosen, playing, failure, all] = await Promise.all([
+    const [chosen, playing, failure, listed] = await Promise.all([
       read($, settings),
       read($, track),
       read($, error),
-      read($, sessions),
+      read($, sources),
     ])
     const { Box, Button, Text } = $.ui.resolve(e)
     // The apps playing now, and the hidden ones so they can come back.
-    const apps = [...new Set([...all.map(one => one.app), ...chosen.hidden])]
+    const apps = [...new Set([...listed.map(one => one.app), ...chosen.hidden])]
 
     const row = <T extends string>(
       title: string,
@@ -549,11 +579,11 @@ export const register: Register = on => {
             <Text dimColor>Источники: выделенные показываются, нажми, чтобы скрыть или вернуть</Text>
             <Box flexDirection="row" gap="xs" flexWrap="wrap">
               {apps.map(app => {
-                const one = all.find(session => session.app === app)
+                const one = listed.find(source => source.app === app)
                 return (
                   <Button
                     key={`source-${app}`}
-                    label={one === undefined ? appName(app) : `${appName(app)}: ${clip(trackText(one), SOURCE_MAX)}`}
+                    label={one === undefined ? appName(app) : `${appName(app)}: ${clip(one.text, SOURCE_MAX)}`}
                     variant={chosen.hidden.includes(app) ? 'secondary' : 'primary'}
                     onPress={() => void toggleSource($, app)}
                   />
@@ -566,10 +596,27 @@ export const register: Register = on => {
     )
   })
 
+  // The band's clock asks for the time twice a second; the answer is its next props.
+  on('ui.message', async ($, e, next) => {
+    if (e.element !== 'clock') return next(e)
+    seen.clockAsks += 1
+    const [chosen, playing] = await Promise.all([read($, settings), read($, track)])
+    const time = playing === null ? undefined : timeText(playing, await $.clock.now())
+    return time === undefined ? next(e) : { props: { time, size: TEXT_SIZE[chosen.size] } }
+  })
+
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     seen.bandCalls += 1
     seen.bandSurface = e.surface
-    const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, now)])
+    // Where the surface runs the live parts (equalizer, clock) itself, the band
+    // reads no clock: it is drawn again only when the track, its state or a
+    // setting changes, and a button under the pointer stays as it is.
+    const isLive = LIVE_SURFACES.includes(e.surface)
+    const [chosen, playing, at] = await Promise.all([
+      read($, settings),
+      read($, track),
+      isLive ? $.clock.now() : read($, now),
+    ])
     // Whatever other plugins put in the band stays; the player goes under it.
     const others = await next(e)
     seen.bandBelow = describe(others)
@@ -580,7 +627,10 @@ export const register: Register = on => {
     }
 
     try {
-      const { Box, Button, Text } = $.ui.resolve(e)
+      const table = $.ui.resolve(e)
+      const { Box, Button, Text } = table
+      const Client = isLive && 'Client' in table ? table.Client : undefined
+      const size = TEXT_SIZE[chosen.size]
       const time = chosen.time === 'on' ? timeText(playing, at) : undefined
       const controls =
         chosen.controls === 'on' ? (
@@ -602,16 +652,22 @@ export const register: Register = on => {
       const player = (
         <Box key="player" flexDirection="row" alignItems="center" gap="sm" justifyContent={JUSTIFY[chosen.top]}>
           {isControlsLast ? null : controls}
-          <Text size={TEXT_SIZE[chosen.size]} dimColor={!playing.isPlaying} mono>
-            {equalizer(playing, at)}
-          </Text>
-          <Text size={TEXT_SIZE[chosen.size]} dimColor={!playing.isPlaying} wrap="truncate-end">
+          {Client === undefined ? (
+            <Text size={size} dimColor={!playing.isPlaying} mono>
+              {equalizer(playing, at)}
+            </Text>
+          ) : (
+            <Client key="equalizer" module="./equalizer.tsx" props={{ isPlaying: playing.isPlaying, size }} />
+          )}
+          <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
             {trackText(playing)}
           </Text>
-          {time === undefined ? null : (
-            <Text size={TEXT_SIZE[chosen.size]} dimColor tabular>
+          {time === undefined ? null : Client === undefined ? (
+            <Text size={size} dimColor tabular>
               {time}
             </Text>
+          ) : (
+            <Client key="clock" module="./clock.tsx" props={{ time, size }} />
           )}
           {isControlsLast ? controls : null}
         </Box>

@@ -15,6 +15,9 @@ export type Track = {
 // calls it the current one.
 export type Session = Track & { isCurrent: boolean }
 
+// An app in the panel's sources, with what it plays.
+export type Source = { app: string; text: string }
+
 // Where the band above the prompt sits, or off.
 export type TopPlace = 'off' | 'left' | 'center' | 'right'
 
@@ -41,8 +44,13 @@ declare module 'claude-code' {
   interface PluginState {
     'now-playing': {
       // Every session the helper last reported, and the one shown of them.
+      // `track` changes only when what it shows does: another track or state,
+      // or a time a second or two off where it counts on to.
       sessions: Session[]
       track: Track | null
+      // The apps the sessions come from, changed only when one comes or goes
+      // or plays something else.
+      sources: Source[]
       settings: PlayerSettings
       // The clock at the last animation tick, in ms since the epoch.
       now: number
