@@ -3,6 +3,8 @@
 # so any app that publishes there is covered: Spotify, Yandex Music,
 # browsers (VK, SoundCloud, YouTube), Telegram, local players.
 #
+# Also reads how loud the sound is, ten times a second, for the equalizer.
+#
 # Also presses the playback buttons: the plugin writes a press as JSON, the
 # button (previous, toggle, play, pause, next) and the app it is for, to the
 # command file announced in the first line, and the script passes it on.
@@ -43,6 +45,106 @@ try {
 catch {
     Write-Line @{ error = "media sessions unavailable: $($_.Exception.Message)" }
     exit 1
+}
+
+# The default output device's peak meter, the one the volume mixer shows:
+# how loud the sound is now, for the equalizer. Optional: without it the
+# equalizer plays its own frames.
+$meterSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace NowPlaying
+{
+    [ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    internal class DeviceEnumerator
+    {
+    }
+
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceEnumerator
+    {
+        [PreserveSig] int EnumAudioEndpoints(int dataFlow, int stateMask, out IntPtr devices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IMMDevice device);
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDevice
+    {
+        [PreserveSig] int Activate(ref Guid iid, int context, IntPtr parameters, [MarshalAs(UnmanagedType.IUnknown)] out object face);
+    }
+
+    [ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioMeterInformation
+    {
+        [PreserveSig] int GetPeakValue(out float peak);
+        [PreserveSig] int GetMeteringChannelCount(out int count);
+        [PreserveSig] int GetChannelsPeakValues(int count, [In, Out, MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] float[] peaks);
+    }
+
+    // Peaks of the sound playing now, 0 to 1: overall, left, right.
+    public static class Meter
+    {
+        private static IAudioMeterInformation meter;
+        private static DateTime openedAt = DateTime.MinValue;
+
+        public static float[] Read()
+        {
+            // The default device changes (headphones in): open it again now and then.
+            if (meter == null || (DateTime.UtcNow - openedAt).TotalSeconds > 5)
+            {
+                meter = Open();
+                openedAt = DateTime.UtcNow;
+            }
+            try
+            {
+                float peak;
+                int count;
+                Marshal.ThrowExceptionForHR(meter.GetPeakValue(out peak));
+                Marshal.ThrowExceptionForHR(meter.GetMeteringChannelCount(out count));
+                float[] channels = new float[Math.Max(count, 1)];
+                if (count > 0) Marshal.ThrowExceptionForHR(meter.GetChannelsPeakValues(count, channels));
+                return new float[] { peak, channels[0], count > 1 ? channels[1] : channels[0] };
+            }
+            catch
+            {
+                meter = null;
+                throw;
+            }
+        }
+
+        private static IAudioMeterInformation Open()
+        {
+            IMMDeviceEnumerator devices = (IMMDeviceEnumerator)new DeviceEnumerator();
+            IMMDevice device;
+            // Rendering (0), the multimedia role (1).
+            Marshal.ThrowExceptionForHR(devices.GetDefaultAudioEndpoint(0, 1, out device));
+            Guid iid = typeof(IAudioMeterInformation).GUID;
+            object face;
+            // CLSCTX_ALL.
+            Marshal.ThrowExceptionForHR(device.Activate(ref iid, 23, IntPtr.Zero, out face));
+            return (IAudioMeterInformation)face;
+        }
+    }
+}
+'@
+$hasMeter = $false
+try {
+    Add-Type -TypeDefinition $meterSource -Language CSharp
+    $hasMeter = $true
+}
+catch {
+}
+
+# The meter's peaks, rounded; $null without a meter or when it fails to read.
+function Get-Levels {
+    if (-not $hasMeter) { return $null }
+    try {
+        , @([NowPlaying.Meter]::Read() | ForEach-Object { [math]::Round([double]$_, 2) })
+    }
+    catch {
+        $null
+    }
 }
 
 # One file per running script, so two Claude sessions never share a press.
@@ -165,6 +267,8 @@ function Send-MediaCommand($order) {
 }
 
 $last = $null
+$lastLevels = $null
+$between = $null
 $step = 0
 $fastUntil = [DateTime]::MinValue
 while ($true) {
@@ -182,6 +286,21 @@ while ($true) {
         Write-Line @{ command = [string]$order.command; app = [string]$order.app; ok = $isDone }
         # Look often for a while, so the new track or state shows at once.
         $fastUntil = [DateTime]::Now.AddSeconds(2)
+    }
+
+    # Ten readings a second while they change, and one a second anyway, so
+    # silence reads as silence and not as a meter gone quiet. Each is the
+    # higher of two, so a short beat between readings is not missed.
+    $levels = Get-Levels
+    if ($levels -and $between) {
+        $levels = @(0..2 | ForEach-Object { [math]::Max([double]$levels[$_], [double]$between[$_]) })
+    }
+    if ($levels) {
+        $text = $levels -join ' '
+        if ($text -ne $lastLevels -or $step % 10 -eq 0) {
+            Write-Line @{ levels = $levels }
+            $lastLevels = $text
+        }
     }
 
     if ($step % 5 -eq 0 -or [DateTime]::Now -lt $fastUntil) {
@@ -205,5 +324,7 @@ while ($true) {
     if ($step % 100 -eq 99 -and (Test-ParentGone)) { exit 0 }
 
     $step += 1
-    Start-Sleep -Milliseconds 100
+    Start-Sleep -Milliseconds 50
+    $between = Get-Levels
+    Start-Sleep -Milliseconds 50
 }

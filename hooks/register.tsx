@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type {
   BottomPlace,
+  EqualizerMode,
   FoundLyrics,
   LyricLine,
   Palette,
@@ -45,6 +46,7 @@ const DEFAULTS: PlayerSettings = {
   time: 'on',
   lyrics: 'off',
   palette: 'claude',
+  equalizer: 'frames',
   color: '#5ab0ff',
   hidden: [],
 }
@@ -57,12 +59,13 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '2.0.1'
+const VERSION = '2.1.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
 const SWITCHES: readonly Switch[] = ['off', 'on']
 const PALETTES: readonly Palette[] = ['mono', 'claude', 'neon', 'sunset', 'rgb', 'custom']
+const EQUALIZER_MODES: readonly EqualizerMode[] = ['frames', 'live']
 const LINE_MAX = 60
 // How far the app's report may stray from the time counted on before it is shown.
 const DRIFT_S = 2
@@ -92,6 +95,19 @@ const STATS_MS = 30_000
 const STATS_LEASE_MS = 90_000
 // Longer between two looks (the computer asleep) counts as this long.
 const STATS_GAP_MS = 120_000
+// The live equalizer's heights, lowest to highest (no ▄, as in the frames).
+const METER_GLYPHS = ['▁', '▂', '▃', '▅', '▆', '▇']
+// Per reading, ten a second: how much of its height each bar keeps when the
+// sound drops, so it falls back smoothly, like a needle, not to nothing at
+// once; a little different per bar, so the three do not move as one.
+const METER_FALLS = [0.72, 0.85, 0.78]
+// Per reading: the loudest recent height, the bars' top, fades slowly, so
+// the bars dance at any volume.
+const METER_DECAY = 0.99
+// A peak below this is silence.
+const METER_FLOOR = 0.02
+// Readings come at least once a second; older ones mean the meter is gone.
+const METER_FRESH_MS = 2000
 const MAX_FAILED_STARTS = 5
 const STDERR_KEPT = 300
 
@@ -104,6 +120,9 @@ const TOP_LABELS: Record<TopPlace, string> = { off: 'выкл', left: 'слев�
 const SIZE_LABELS: Record<TextSize, string> = { small: 'маленький', normal: 'обычный' }
 const BOTTOM_LABELS: Record<BottomPlace, string> = { off: 'выкл', model: 'вкл' }
 const SWITCH_LABELS: Record<Switch, string> = { off: 'выкл', on: 'вкл' }
+const EQUALIZER_LABELS: Record<EqualizerMode, string> = { frames: 'обычный', live: 'живой' }
+// What `/player equalizer` accepts.
+const EQUALIZER_WORDS: Record<string, EqualizerMode> = { frames: 'frames', live: 'live', обычный: 'frames', живой: 'live' }
 const PALETTE_LABELS: Record<Palette, string> = {
   mono: 'без цвета',
   claude: 'Claude',
@@ -186,18 +205,47 @@ export const cleanTrack = <T extends Track>(raw: T): T => {
 export const trackText = (one: Track): string =>
   one.artist === '' ? one.title : `${one.artist} — ${one.title}`
 
-const equalizer = (one: Track, at: number): string =>
+// The helper's meter: the bars' top, the last three readings (overall, left,
+// right) newest first, the bars they make and when the last one came.
+// Module variables on purpose: ten readings a second must not redraw anything.
+const meter = { top: 0, heights: [0, 0, 0], bars: undefined as string | undefined, at: -Infinity }
+
+// Turns one reading into the live bars: the left channel now, the overall
+// peak a reading ago, the right channel two ago, a wave rather than three
+// equal bars; each scaled to the loudest recent peak.
+const readMeter = (levels: readonly number[], at: number): void => {
+  const [peak = 0, left = peak, right = peak] = levels
+  meter.heights = [left, peak, right].map((level, index) =>
+    Math.max(level, (meter.heights[index] ?? 0) * (METER_FALLS[index] ?? 0.8)),
+  )
+  meter.top = Math.max(...meter.heights, meter.top * METER_DECAY, METER_FLOOR)
+  // A square-root scale, so quiet passages still show.
+  const bar = (height: number): string =>
+    height < METER_FLOOR ? '▁' : (METER_GLYPHS[Math.min(5, Math.round(Math.sqrt(height / meter.top) * 5))] ?? '▁')
+  meter.bars = meter.heights.map(bar).join('')
+  meter.at = at
+}
+
+// The live bars while the meter keeps reading, else undefined.
+const liveBars = (at: number): string | undefined => (at - meter.at < METER_FRESH_MS ? meter.bars : undefined)
+
+const equalizer = (one: Track, at: number, isLive: boolean): string =>
   one.isPlaying
-    ? (EQUALIZER[Math.floor(at / FRAME_MS) % EQUALIZER.length] ?? EQUALIZER_PAUSED)
+    ? ((isLive ? liveBars(at) : undefined) ?? EQUALIZER[Math.floor(at / FRAME_MS) % EQUALIZER.length] ?? EQUALIZER_PAUSED)
     : EQUALIZER_PAUSED
 
 const colorsOf = (chosen: PlayerSettings): Colors => paletteColors(chosen.palette, chosen.color)
 
-const equalizerProps = (one: Track, size: EqualizerProps['size'], colors: Colors): EqualizerProps => ({
-  isPlaying: one.isPlaying,
-  size,
-  colors: colors.bars,
-})
+const equalizerProps = (
+  one: Track,
+  at: number,
+  size: EqualizerProps['size'],
+  colors: Colors,
+  isLive: boolean,
+): EqualizerProps => {
+  const bars = isLive ? liveBars(at) : undefined
+  return { isPlaying: one.isPlaying, size, colors: colors.bars, isLive, ...(bars === undefined ? {} : { bars }) }
+}
 
 const clip = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
@@ -233,9 +281,9 @@ const isSame = (shown: Track | null, next: Track | null, at: number): boolean =>
       (shown.duration ?? 0) === (next.duration ?? 0) &&
       Math.abs(positionAt(shown, at) - positionAt(next, at)) < DRIFT_S
 
-const lineText = (one: Track, at: number, isTimed: boolean): string => {
+const lineText = (one: Track, at: number, isTimed: boolean, isLive: boolean): string => {
   const time = isTimed ? timeText(one, at) : undefined
-  return `${equalizer(one, at)}  ${clip(trackText(one), LINE_MAX)}${time === undefined ? '' : `  ${time}`}`
+  return `${equalizer(one, at, isLive)}  ${clip(trackText(one), LINE_MAX)}${time === undefined ? '' : `  ${time}`}`
 }
 
 const isOneOf = <T extends string>(options: readonly T[], value: unknown): value is T =>
@@ -253,6 +301,7 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
       time: isOneOf(SWITCHES, saved.time) ? saved.time : DEFAULTS.time,
       lyrics: isOneOf(SWITCHES, saved.lyrics) ? saved.lyrics : DEFAULTS.lyrics,
       palette: isOneOf(PALETTES, saved.palette) ? saved.palette : DEFAULTS.palette,
+      equalizer: isOneOf(EQUALIZER_MODES, saved.equalizer) ? saved.equalizer : DEFAULTS.equalizer,
       color: parseHex(String(saved.color)) ?? DEFAULTS.color,
       hidden: Array.isArray(saved.hidden) ? saved.hidden.filter((app): app is string => typeof app === 'string') : [],
     }
@@ -268,7 +317,7 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
 const refreshStatus = async ($: EngineInterface): Promise<void> => {
   const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, now)])
 
-  $.ui.status(chosen.bottom === 'model' && playing !== null ? lineText(playing, at, chosen.time === 'on') : undefined)
+  $.ui.status(chosen.bottom === 'model' && playing !== null ? lineText(playing, at, chosen.time === 'on', chosen.equalizer === 'live') : undefined)
 }
 
 // Which session to show. One that plays: the one shown last, then the one
@@ -529,11 +578,12 @@ const reportNone = async ($: EngineInterface): Promise<void> => {
   await select($)
 }
 
-// What the Windows helper prints: its command file, the sessions, a press's
-// outcome, or a failure.
+// What the Windows helper prints: its command file, the sessions, the
+// meter, a press's outcome, or a failure.
 type HelperLine = {
   commands?: string
   sessions?: Session[]
+  levels?: number[]
   command?: string
   app?: string
   ok?: boolean
@@ -580,6 +630,10 @@ const watchWindows = async ($: EngineInterface): Promise<void> => {
             }
             continue
           }
+          if (message.levels !== undefined) {
+            readMeter(message.levels, await $.clock.now())
+            continue
+          }
           if (message.command !== undefined) {
             const outcome = message.ok === true ? 'выполнило' : 'отказалось'
             seen.lastAnswer = `${message.command} в ${message.app ?? '—'}: приложение ${outcome}`
@@ -593,6 +647,7 @@ const watchWindows = async ($: EngineInterface): Promise<void> => {
     }
     commandFile = null
     presser = null
+    meter.at = -Infinity
 
     if (!isHeard) {
       failedStarts += 1
@@ -703,6 +758,7 @@ const HELP = [
   '/player time off|on               — время трека',
   '/player lyrics off|on             — текст песни вместо названия',
   '/player color claude|neon|sunset|rgb|mono|#цвет — цвет эквалайзера и слова',
+  '/player equalizer frames|live     — эквалайзер обычный или живой, под звук',
   '/player prev|pause|play|next      — управлять музыкой',
   '/player stats                     — что ты слушал за день и за неделю',
   '/player off | on                  — выключить или включить всё',
@@ -718,6 +774,7 @@ const summary = (chosen: PlayerSettings): string =>
     `Кнопки: ${SWITCH_LABELS[chosen.controls]}`,
     `Время: ${SWITCH_LABELS[chosen.time]}`,
     `Текст: ${SWITCH_LABELS[chosen.lyrics]}`,
+    `Эквалайзер: ${EQUALIZER_LABELS[chosen.equalizer]}`,
     `Цвет: ${PALETTE_LABELS[chosen.palette]}${chosen.palette === 'custom' ? ` ${chosen.color}` : ''}`,
   ].join(' · ')
 
@@ -857,6 +914,13 @@ const debugText = async ($: EngineInterface): Promise<string> => {
     `  последний раз не рисовал, потому что: ${seen.bandSkipped}`,
     `  ошибка: ${seen.bandFailure}`,
     `  часы спрашивали время: ${seen.clockAsks} раз`,
+    `  эквалайзер: ${
+      chosen.equalizer === 'frames'
+        ? 'обычный, свои кадры'
+        : liveBars(at) === undefined
+          ? `живой выбран, но громкость не читается${platform === 'windows' ? '' : ' (живой есть только на Windows)'}`
+          : `живой, последнее чтение ${Math.round(at - meter.at)} мс назад`
+    }`,
     '',
     `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
     '',
@@ -903,6 +967,13 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
       const chosen = await read($, settings)
       return palette === 'custom' ? `Свой цвет: ${chosen.color}.` : `Цвет: ${PALETTE_LABELS[palette]}.`
     }
+  }
+  const mode = lookup(EQUALIZER_WORDS, value)
+  if (what === 'equalizer' && mode !== undefined) {
+    await choose($, { equalizer: mode })
+    return mode === 'live'
+      ? `Эквалайзер: живой. ${platform === 'windows' ? 'Столбики прыгают под звук.' : 'Живой есть только на Windows, здесь останутся свои кадры.'}`
+      : 'Эквалайзер: обычный.'
   }
   if (what === 'lyrics' && isOneOf(SWITCHES, value)) {
     await choose($, { lyrics: value })
@@ -997,7 +1068,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'player',
       description: 'Плеер: что играет и где его показывать',
-      argumentHint: '[next|pause|play|prev|stats|top|size|bottom|buttons|time|lyrics|color|off|on|debug|bug]',
+      argumentHint: '[next|pause|play|prev|stats|top|size|bottom|buttons|time|lyrics|color|equalizer|off|on|debug|bug]',
     })
 
     // Animates the equalizer only while something plays and is on screen.
@@ -1110,6 +1181,7 @@ export const register: Register = on => {
         {row('Внизу', 'bottom', BOTTOM_PLACES, BOTTOM_LABELS, chosen.bottom)}
         {row('Кнопки', 'controls', SWITCHES, SWITCH_LABELS, chosen.controls)}
         {row('Время трека', 'time', SWITCHES, SWITCH_LABELS, chosen.time)}
+        {row('Эквалайзер: обычный или живой, под звук (только Windows)', 'equalizer', EQUALIZER_MODES, EQUALIZER_LABELS, chosen.equalizer)}
         <Box flexDirection="column">
           {row('Текст песни вместо названия', 'lyrics', SWITCHES, SWITCH_LABELS, chosen.lyrics)}
           <Text dimColor size="caption">
@@ -1173,18 +1245,19 @@ export const register: Register = on => {
     )
   })
 
-  // The band's clock and lyrics ask for what changes by the moment; the
-  // answer is their next props. The panel's picker posts a click.
+  // The band's clock, equalizer and lyrics ask for what changes by the
+  // moment; the answer is their next props. The panel's picker posts a click.
   on('ui.message', async ($, e, next) => {
     if (e.element === 'picker') {
       const picked = await pickColor($, e.data)
       return picked === undefined ? next(e) : { props: pickerProps(picked) }
     }
-    if (e.element !== 'clock' && e.element !== 'lyrics') return next(e)
+    if (e.element !== 'clock' && e.element !== 'lyrics' && e.element !== 'equalizer') return next(e)
     const [chosen, playing, sung] = await Promise.all([read($, settings), read($, track), read($, lyrics)])
     if (playing === null) return next(e)
     const [at, size, colors] = [await $.clock.now(), TEXT_SIZE[chosen.size], colorsOf(chosen)]
 
+    if (e.element === 'equalizer') return { props: equalizerProps(playing, at, size, colors, chosen.equalizer === 'live') }
     if (e.element === 'lyrics') {
       const lines = linesFor(chosen, playing, sung)
       return lines === undefined ? next(e) : { props: lyricsProps(playing, lines, at, size, colors) }
@@ -1247,14 +1320,14 @@ export const register: Register = on => {
           {Client === undefined ? (
             <Text size={size} dimColor={!playing.isPlaying} mono>
               {playing.isPlaying && colors.bars.length > 0
-                ? [...equalizer(playing, at)].map((glyph, index) => {
+                ? [...equalizer(playing, at, chosen.equalizer === 'live')].map((glyph, index) => {
                     const color = barColor(colors.bars, index, Math.floor(at / FRAME_MS))
                     return color === undefined ? <Text>{glyph}</Text> : <Text color={color}>{glyph}</Text>
                   })
-                : equalizer(playing, at)}
+                : equalizer(playing, at, chosen.equalizer === 'live')}
             </Text>
           ) : (
-            <Client key="equalizer" module="./equalizer.tsx" props={equalizerProps(playing, size, colors)} />
+            <Client key="equalizer" module="./equalizer.tsx" props={equalizerProps(playing, at, size, colors, chosen.equalizer === 'live')} />
           )}
           {lines === undefined ? (
             <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
