@@ -1,6 +1,6 @@
 {
   "name": "now-playing",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "description": "Shows the track playing in any app above the prompt and next to the model picker, with playback buttons, the track time and synced lyrics",
   "author": {
     "name": "playsin333"

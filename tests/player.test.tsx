@@ -2,6 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 import type { MockClock } from 'claude-code/testing'
 
+import { dayOf } from '../hooks/stats'
+
 const BAND = {
   plugin: 'now-playing',
   component: 'AbovePrompt',
@@ -231,7 +233,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.7.0')
+  expect(answer.text).toContain('now-playing 1.8.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -838,4 +840,62 @@ test('the panel with its palettes and picker draws in the terminal too', async (
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await barColors(band)).toEqual(['#97cdff', '#5ab0ff', '#1d93ff'])
   await band.unmount()
+})
+
+const STATS_PANEL = { ...PANEL, props: { ...PANEL.props, args: 'stats' } } as const
+const SCRIPTONITE = line({ app: 'Spotify.exe', artist: 'Скриптонит', title: 'Положение', isPlaying: true })
+const SCRIPTONITE_PAUSED = line({ app: 'Spotify.exe', artist: 'Скриптонит', title: 'Положение', isPlaying: false })
+
+test('listening adds up by track and artist, a pause adds nothing, and /player stats shows it', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  // A minute of Gym Class, half a minute of Положение, then a pause.
+  await start(on, [COMMANDS, GYM_CLASS, 60_000, SCRIPTONITE, 30_000, SCRIPTONITE_PAUSED], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  // Past the pause, before the stand-in helper ends at 150 s and starts over.
+  await clock.advance(140_000)
+
+  const text = (await $.command.run(run('stats'))).text ?? ''
+  expect(text).toContain('Сегодня: 1 мин, треков: 2')
+  expect(text).toContain('████████████ Lil Peep · 1 мин')
+  expect(text).toContain('██████░░░░░░ Скриптонит · 30 с')
+  expect(text).toContain('████████████ Lil Peep — Gym Class · 1 мин, раз: 1')
+  expect(text).toContain('██████░░░░░░ Скриптонит — Положение · 30 с, раз: 1')
+
+  const panel = await $.ui.mount({ ...STATS_PANEL, surface: 'desktop' })
+  expect((await panel.find({ type: 'Text', text: /^За неделю/ }))?.text).toBe('За неделю: 1 мин, треков: 2')
+  // The bars take the palette's color, Claude's middle shade.
+  const colored = (await panel.findAll({ type: 'Text', text: /^█+$/ })).map(bar => bar.props.color).filter(Boolean)
+  expect(colored).toEqual(['#d97757', '#d97757', '#d97757', '#d97757'])
+  await panel.unmount()
+})
+
+test('stats an earlier session saved are shown, and the week leaves older days out', async ($, on) => {
+  const clock = mock.clock(on, { now: 40 * 86_400_000 })
+  const days = {
+    [dayOf(40 * 86_400_000)]: { 'Lil Peep\nGym Class': { artist: 'Lil Peep', title: 'Gym Class', seconds: 3_700, plays: 2 } },
+    [dayOf(20 * 86_400_000)]: { 'Old\nSong': { artist: 'Old', title: 'Song', seconds: 900, plays: 1 } },
+  }
+  await start(on, [COMMANDS], clock, { stats: { v: 1, days } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const text = (await $.command.run(run('stats'))).text ?? ''
+  expect(text).toContain('Сегодня: 1 ч 1 мин, треков: 1')
+  expect(text).toContain('Lil Peep — Gym Class · 1 ч 1 мин, раз: 2')
+  expect(text).not.toContain('Old')
+})
+
+test('while another window counts, this one does not count the same music twice', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  await start(on, [COMMANDS, GYM_CLASS], clock, { statsOwner: { id: 'another window', at: 1_000_000 } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  await clock.advance(60_000)
+  expect((await $.command.run(run('stats'))).text).toContain('Пока пусто')
+
+  // The other window went quiet: after its claim runs out, this one counts.
+  await clock.advance(120_000)
+  expect((await $.command.run(run('stats'))).text).toContain('Lil Peep — Gym Class · 1 мин')
 })

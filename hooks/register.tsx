@@ -22,6 +22,18 @@ import type { EqualizerProps } from './equalizer'
 import { parseLrc, reveal } from './lyrics'
 import type { LyricsProps } from './lyrics'
 import type { PickerClick, PickerProps } from './picker'
+import {
+  STATS_TITLE,
+  addListening,
+  barCells,
+  durationText,
+  emptyStats,
+  pruneStats,
+  readStats,
+  reportOf,
+  reportText,
+} from './stats'
+import type { Ranked } from './stats'
 
 const DEFAULTS: PlayerSettings = {
   top: 'center',
@@ -43,7 +55,7 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.7.0'
+const VERSION = '1.8.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -69,6 +81,12 @@ const DURATION_FAR_S = 10
 // A failed lyrics search is tried again after this long, not on every report.
 const LYRICS_RETRY_MS = 60_000
 const RESTART_MS = 3000
+// Statistics are written to the store this often, by one session of several.
+const STATS_MS = 30_000
+// Another session that wrote this recently is the one counting.
+const STATS_LEASE_MS = 90_000
+// Longer between two looks (the computer asleep) counts as this long.
+const STATS_GAP_MS = 120_000
 // The live equalizer's heights, lowest to highest (no ▄, as in the frames).
 const METER_GLYPHS = ['▁', '▂', '▃', '▅', '▆', '▇']
 // Per reading, ten a second: the loudest recent peak, the bars' top, halves
@@ -295,9 +313,70 @@ const select = async ($: EngineInterface): Promise<void> => {
   const next = pick(all, chosen.hidden, shown?.app) ?? null
   if (!isSame(shown, next, await $.clock.now())) await update($, track, () => next)
   await refreshStatus($)
+  await countListening($)
   findLyrics($).catch(() => {
     // The module is unloading; the next load looks again.
   })
+}
+
+// The listening statistics: the days counted, the stretch playing now since
+// the last look, the track counted last (a pause and play is not another
+// play), and whether this session is the one counting, the others leaving it
+// be so two windows do not count twice. Module variables: looked at many
+// times a minute, written to the store on a timer.
+const listening = {
+  stats: emptyStats(),
+  id: Math.random().toString(36).slice(2),
+  isCounting: false,
+  isDirty: false,
+  stretch: null as { artist: string; title: string; from: number } | null,
+  lastKey: '',
+}
+
+// Counts the stretch since the last look to the track that played then, and
+// starts the next one when a track plays now.
+const countListening = async ($: EngineInterface): Promise<void> => {
+  const [at, playing] = await Promise.all([$.clock.now(), read($, track)])
+  const { stretch } = listening
+  if (stretch !== null && listening.isCounting && at > stretch.from) {
+    addListening(listening.stats, at, stretch, Math.min(at - stretch.from, STATS_GAP_MS) / 1000, false)
+    listening.isDirty = true
+  }
+  listening.stretch = null
+  if (playing === null || !playing.isPlaying) return
+
+  const key = `${playing.artist}\n${playing.title}`
+  if (listening.isCounting && key !== listening.lastKey) {
+    addListening(listening.stats, at, playing, 0, true)
+    listening.isDirty = true
+  }
+  listening.lastKey = key
+  listening.stretch = { artist: playing.artist, title: playing.title, from: at }
+}
+
+// Takes the counting over unless another session wrote lately; taking it
+// over starts from what the store holds.
+const claimStats = async ($: EngineInterface): Promise<void> => {
+  const [at, owner] = await Promise.all([$.clock.now(), $.store.get('statsOwner')])
+  const { id, at: ownedAt } = (owner ?? {}) as { id?: unknown; at?: unknown }
+  if (id !== listening.id && typeof ownedAt === 'number' && at - ownedAt < STATS_LEASE_MS) {
+    listening.isCounting = false
+    listening.isDirty = false
+    return
+  }
+  if (!listening.isCounting) listening.stats = readStats(await $.store.get('stats'))
+  listening.isCounting = true
+  await $.store.set('statsOwner', { id: listening.id, at })
+}
+
+// Counts up to now, renews the claim, and writes what changed.
+const flushStats = async ($: EngineInterface): Promise<void> => {
+  await countListening($)
+  await claimStats($)
+  if (!listening.isCounting || !listening.isDirty) return
+  pruneStats(listening.stats, await $.clock.now())
+  await $.store.set('stats', listening.stats)
+  listening.isDirty = false
 }
 
 // What LRCLIB is searched by: the title without bracketed tags or features,
@@ -540,6 +619,7 @@ const HELP = [
   '/player lyrics off|on             — текст песни вместо названия',
   '/player color claude|neon|sunset|rgb|mono|#цвет — цвет эквалайзера и слова',
   '/player prev|pause|play|next      — управлять музыкой',
+  '/player stats                     — что ты слушал за день и за неделю',
   '/player off | on                  — выключить или включить всё',
   '/player debug                     — что происходит внутри (для поиска багов)',
   '/player bug                       — сообщить о баге: ссылка на форму и диагностика',
@@ -754,23 +834,88 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
   return what === 'off' ? 'Плеер выключен. Включить обратно: /player on' : summary(chosen)
 }
 
+// The color of a statistics bar: the palette's middle shade, a step round the
+// wheel per row for RGB, none without a palette.
+const rankColor = (bars: readonly string[], row: number): string | undefined =>
+  bars.length > 3 ? bars[(row * 7) % bars.length] : bars[1]
+
+// /player stats as a panel: the totals, then the week's top artists and
+// tracks with bars in the palette's colors.
+const drawStats = async ($: EngineInterface, e: Parameters<EngineInterface['ui']['resolve']>[0]) => {
+  const { Box, Text } = $.ui.resolve(e)
+  const [chosen, at] = await Promise.all([read($, settings), $.clock.now()])
+  const report = reportOf(listening.stats, at)
+  const { bars } = colorsOf(chosen)
+
+  const section = (title: string, list: readonly Ranked[], withPlays: boolean) => {
+    const longest = list[0]?.seconds ?? 0
+    return list.length === 0 ? null : (
+      <Box flexDirection="column">
+        <Text dimColor>{title}</Text>
+        {list.map((one, row) => {
+          const [filled, left] = barCells(one.seconds, longest)
+          const color = rankColor(bars, row)
+          const full = '█'.repeat(filled)
+          return (
+            <Box flexDirection="row" gap="sm">
+              <Text mono>
+                {color === undefined ? <Text>{full}</Text> : <Text color={color}>{full}</Text>}
+                <Text dimColor>{'░'.repeat(left)}</Text>
+              </Text>
+              <Text wrap="truncate-end">{one.name}</Text>
+              <Text dimColor>
+                {`${durationText(one.seconds)}${withPlays && one.plays > 0 ? `, раз: ${one.plays}` : ''}`}
+              </Text>
+            </Box>
+          )
+        })}
+      </Box>
+    )
+  }
+
+  return (
+    <Box flexDirection="column" gap="sm">
+      <Text dimColor>{STATS_TITLE}</Text>
+      {report.week.seconds === 0 ? (
+        <Text>Пока пусто: статистика копится, пока играет музыка.</Text>
+      ) : (
+        <Box flexDirection="column" gap="sm">
+          <Box flexDirection="column">
+            <Text>{`Сегодня: ${durationText(report.today.seconds)}, треков: ${report.today.tracks}`}</Text>
+            <Text>{`За неделю: ${durationText(report.week.seconds)}, треков: ${report.week.tracks}`}</Text>
+          </Box>
+          {section('Исполнители за неделю', report.artists, false)}
+          {section('Треки за неделю', report.tracks, true)}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
 
     const loaded = await loadSettings($)
     await update($, settings, () => loaded)
+    await claimStats($)
 
     await $.command.register({
       name: 'player',
       description: 'Плеер: что играет и где его показывать',
-      argumentHint: '[next|pause|play|prev|top|size|bottom|buttons|time|lyrics|color|off|on|debug|bug]',
+      argumentHint: '[next|pause|play|prev|stats|top|size|bottom|buttons|time|lyrics|color|off|on|debug|bug]',
     })
 
     // Animates the equalizer only while something plays and is on screen.
     $.clock.every(FRAME_MS, () => {
       tick($).catch(() => {
         // The module is unloading; the next load starts its own timer.
+      })
+    })
+
+    $.clock.every(STATS_MS, () => {
+      flushStats($).catch(() => {
+        // The module is unloading; what was not written is lost, half a minute at most.
       })
     })
 
@@ -785,6 +930,12 @@ export const register: Register = on => {
     const words = e.args.trim().toLowerCase().split(/\s+/).filter(word => word !== '')
 
     if (words[0] === 'debug') return { text: await debugText($) }
+    if (words[0] === 'stats') {
+      // Another session counting: what it wrote last.
+      if (listening.isCounting) await countListening($)
+      else listening.stats = readStats(await $.store.get('stats'))
+      return { text: reportText(reportOf(listening.stats, await $.clock.now())) }
+    }
     if (words[0] === 'bug') {
       // The user's folder names them; a report is public.
       const report = (await debugText($)).replace(/[A-Za-z]:\\Users\\[^\\]+/g, '%USERPROFILE%')
@@ -802,7 +953,9 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'CommandOutput', props: { command: 'player' } }, async ($, e, next) => {
-    if (e.props.args.trim() !== '' || e.props.isErrored) return next(e)
+    if (e.props.isErrored) return next(e)
+    if (e.props.args.trim().toLowerCase() === 'stats') return drawStats($, e)
+    if (e.props.args.trim() !== '') return next(e)
 
     const [chosen, playing, failure, listed] = await Promise.all([
       read($, settings),
