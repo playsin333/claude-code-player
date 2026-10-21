@@ -233,7 +233,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 2.0.0')
+  expect(answer.text).toContain('now-playing 2.0.1')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -709,40 +709,6 @@ test('/player bug gives the form and a report without the user folder; the panel
   await panel.unmount()
 })
 
-// A reading of the output device's meter: overall, left, right.
-const levels = (peak: number, left: number, right: number): string => `${JSON.stringify({ levels: [peak, left, right] })}\r\n`
-
-test('the equalizer follows the sound while Windows reads its meter, and plays its frames without it', async ($, on) => {
-  const clock = mock.clock(on)
-  const statuses = await start(
-    on,
-    [COMMANDS, GYM_CLASS, levels(0.5, 0.5, 0.5), 100, levels(0.25, 0.1, 0.4), 100, levels(0, 0, 0)],
-    clock,
-  )
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await clock.settle()
-
-  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const bars = async (): Promise<string | undefined> => (await ui.find({ type: 'Text', in: 'equalizer' }))?.text
-  // Loud on every side: all three bars at the top.
-  expect(await bars()).toBe('▇▇▇')
-  expect((await $.command.run(run('debug'))).text).toMatch(/эквалайзер: живой/)
-
-  // Quieter on the left now; the louder reading before stays in the other bars.
-  await both(clock, ui, 100)
-  expect(await bars()).toBe('▂▇▇')
-  await both(clock, ui, 100)
-  expect(await bars()).toBe('▁▅▇')
-  await clock.advance(100)
-  expect(statuses.at(-1)?.startsWith('▁▅▇')).toBe(true)
-
-  // No readings for a while: the meter is gone, and the frames play again.
-  await both(clock, ui, 2_500)
-  expect(await bars()).toMatch(/^[▂▃▅▆▇]{3}$/)
-  expect((await $.command.run(run('debug'))).text).toContain('эквалайзер: свои кадры')
-  await ui.unmount()
-})
-
 // The colors the equalizer's bars are drawn in, left to right.
 const barColors = async (ui: { findAll: (query: { type: string; in: string }) => Promise<{ props: Record<string, unknown> }[]> }) =>
   (await ui.findAll({ type: 'Text', in: 'equalizer' })).slice(1).map(bar => bar.props.color)
@@ -964,7 +930,6 @@ test('on Linux the player reads the MPRIS players through busctl', async ($, on)
 
   const debug = (await $.command.run(run('debug'))).text ?? ''
   expect(debug).toContain('Система: Linux')
-  expect(debug).toContain('эквалайзер: свои кадры, громкость не читается (живой есть только на Windows)')
 })
 
 test('on Linux a button calls the player over D-Bus, and what it did shows at once', async ($, on) => {

@@ -7,14 +7,12 @@ export const FRAME_MS = 300
 // The wheel steps between neighbouring bars when the colors run around one.
 export const WHEEL_SPREAD = 8
 
-// `bars`: the live bars, from how loud the sound is now; absent, the
-// equalizer plays its own frames. `colors`: none, the text's own; three, one
-// per bar; more, a wheel the bars run around.
-export type EqualizerProps = { isPlaying: boolean; size: 'caption' | 'body'; bars?: string; colors: string[] }
+// `colors`: none, the text's own; three, one per bar; more, a wheel the bars
+// run around.
+export type EqualizerProps = { isPlaying: boolean; size: 'caption' | 'body'; colors: string[] }
 
 type EqualizerState = { frame: number; turn: number }
 
-const LEVEL_MS = 100
 const WHEEL_MS = 100
 
 // The color of bar `index`, its turn round the wheel at `turn`.
@@ -25,21 +23,17 @@ export const barColor = (colors: readonly string[], index: number, turn: number)
 const latest = new WeakMap<object, EqualizerProps>()
 
 // Runs on the surface's own clock, so the band around it, buttons and all, is
-// not drawn again on every frame: asks the hooks module for the live bars ten
-// times a second while the track plays, plays its own frames without them,
-// and turns a color wheel when it has one.
+// not drawn again on every frame: plays its frames while the track plays, and
+// turns a color wheel when it has one.
 const Equalizer: ClientModule<EqualizerProps, EqualizerState> = (props, surface) => {
   const { Text } = surface.elements
   latest.set(surface, props)
   if (surface.state === undefined) {
     surface.every(FRAME_MS, () => {
       const state = surface.state
-      if (state !== undefined && latest.get(surface)?.bars === undefined) {
+      if (state !== undefined && latest.get(surface)?.isPlaying === true) {
         surface.setState({ ...state, frame: (state.frame + 1) % EQUALIZER.length })
       }
-    })
-    surface.every(LEVEL_MS, () => {
-      if (latest.get(surface)?.isPlaying === true) surface.post('level')
     })
     surface.every(WHEEL_MS, () => {
       const [state, current] = [surface.state, latest.get(surface)]
@@ -51,7 +45,7 @@ const Equalizer: ClientModule<EqualizerProps, EqualizerState> = (props, surface)
   }
 
   const { frame = 0, turn = 0 } = surface.state ?? {}
-  const glyphs = props.isPlaying ? (props.bars ?? EQUALIZER[frame] ?? EQUALIZER_PAUSED) : EQUALIZER_PAUSED
+  const glyphs = props.isPlaying ? (EQUALIZER[frame] ?? EQUALIZER_PAUSED) : EQUALIZER_PAUSED
   if (!props.isPlaying || props.colors.length === 0) {
     return (
       <Text size={props.size} dimColor={!props.isPlaying} mono>
