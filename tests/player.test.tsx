@@ -36,6 +36,7 @@ const start = async (
   mock.store(on, stored)
   on('command.register', () => ({ value: { command: 'player' } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.surfaces', () => ({ value: ['desktop'] as const }))
   on('ui.status', (_, e) => {
     statuses.push(e.text ?? '')
     return { value: undefined }
@@ -129,6 +130,24 @@ test('a mode saved earlier is used from the start', async ($, on) => {
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('/player debug reports what the band hook saw', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.unmount()
+
+  const answer = await $.command.run(run('debug'))
+  expect(answer.text).toContain('now-playing 1.0.2')
+  expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
+  expect(answer.text).toMatch(/просило нарисовать: [1-9]/)
+  expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
+  expect(answer.text).toContain('последняя поверхность: desktop')
+  expect(answer.text).toContain('Поверхности сессии: desktop')
 })
 
 test('/player says when the helper ends without a word', async ($, on) => {

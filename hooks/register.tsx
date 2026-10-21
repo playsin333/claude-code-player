@@ -8,6 +8,7 @@ const mode = atom({ plugin: 'now-playing', key: 'mode' } as const, 'both')
 const frame = atom({ plugin: 'now-playing', key: 'frame' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
+const VERSION = '1.0.2'
 const MODES: readonly Mode[] = ['bar', 'line', 'both', 'off']
 const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▄▆▃', '▆▃▄']
 const EQUALIZER_PAUSED = '▁▁▁'
@@ -125,7 +126,26 @@ const HELP = [
   '/player line  — строчка возле модели',
   '/player both  — оба сразу',
   '/player off   — выключить',
+  '/player debug — что происходит внутри (для поиска багов)',
 ].join('\n')
+
+// What the band hook has seen since the module loaded, for /player debug.
+// Module variables on purpose: a render hook may not write state.
+const band = {
+  calls: 0,
+  drawn: 0,
+  surface: '—',
+  below: '—',
+  skipped: '—',
+  failure: '—',
+}
+
+const describe = (element: unknown): string => {
+  if (element === null || element === undefined) return 'ничего'
+  if (typeof element !== 'object') return typeof element
+  const { type, ref } = element as { type?: unknown; ref?: unknown }
+  return type === 'engine' ? `engine (ref ${String(ref)})` : String(type)
+}
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
@@ -180,32 +200,68 @@ export const register: Register = on => {
         : playing === null
           ? 'Сейчас ничего не играет.'
           : `${playing.isPlaying ? 'Играет' : 'На паузе'}: ${trackText(playing)} (${playing.app})`
+
+    if (asked === 'debug') {
+      const surfaces = await $.session.surfaces()
+      return {
+        text: [
+          `now-playing ${VERSION}`,
+          `Поверхности сессии: ${surfaces.length === 0 ? 'нет' : surfaces.join(', ')}`,
+          `Режим: ${current}`,
+          now,
+          '',
+          'Полоса над полем ввода:',
+          `  приложение просило нарисовать: ${band.calls} раз`,
+          `  плеер нарисован: ${band.drawn} раз`,
+          `  последняя поверхность: ${band.surface}`,
+          `  под плеером: ${band.below}`,
+          `  последний раз не рисовал, потому что: ${band.skipped}`,
+          `  ошибка: ${band.failure}`,
+        ].join('\n'),
+      }
+    }
+
     const intro = asked === '' ? '' : `Не знаю «${asked}».\n\n`
 
     return { text: `${intro}${now}\nРежим: ${current}\n\n${HELP}` }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    band.calls += 1
+    band.surface = e.surface
     const [current, playing, at] = await Promise.all([read($, mode), read($, track), read($, frame)])
     // Whatever other plugins put in the band stays; the player goes under it.
     const others = await next(e)
+    band.below = describe(others)
 
     if (e.props.hasSurvey || playing === null || !showsBar(current)) {
+      band.skipped = e.props.hasSurvey ? 'там опрос' : playing === null ? 'ничего не играет' : `режим ${current}`
       return others
     }
 
-    const { Box, Text } = $.ui.resolve(e)
-    const isPaused = !playing.isPlaying
-
-    return (
-      <Box flexDirection="column" width="100%">
-        {others}
-        <Box justifyContent="center" width="100%">
-          <Text dimColor={isPaused} wrap="truncate-end">
-            {equalizer(playing, at)}  {trackText(playing)}
+    try {
+      const { Box, Text } = $.ui.resolve(e)
+      const player = (
+        <Box justifyContent="center">
+          <Text dimColor={!playing.isPlaying} wrap="truncate-end">
+            {`${equalizer(playing, at)}  ${trackText(playing)}`}
           </Text>
         </Box>
-      </Box>
-    )
+      )
+      band.drawn += 1
+
+      // A bare engine node is the engine's own band, empty outside a survey.
+      const isAlone = others === null || others === undefined || (others as { type?: unknown }).type === 'engine'
+
+      return isAlone ? player : (
+        <Box flexDirection="column">
+          {others}
+          {player}
+        </Box>
+      )
+    } catch (thrown) {
+      band.failure = thrown instanceof Error ? thrown.message : String(thrown)
+      return others
+    }
   })
 }
