@@ -8,7 +8,7 @@ const mode = atom({ plugin: 'now-playing', key: 'mode' } as const, 'both')
 const frame = atom({ plugin: 'now-playing', key: 'frame' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.0.2'
+const VERSION = '1.0.3'
 const MODES: readonly Mode[] = ['bar', 'line', 'both', 'off']
 const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▄▆▃', '▆▃▄']
 const EQUALIZER_PAUSED = '▁▁▁'
@@ -243,7 +243,7 @@ export const register: Register = on => {
       const { Box, Text } = $.ui.resolve(e)
       const player = (
         <Box justifyContent="center">
-          <Text dimColor={!playing.isPlaying} wrap="truncate-end">
+          <Text size="caption" dimColor={!playing.isPlaying} wrap="truncate-end">
             {`${equalizer(playing, at)}  ${trackText(playing)}`}
           </Text>
         </Box>

@@ -142,7 +142,7 @@ test('/player debug reports what the band hook saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.0.2')
+  expect(answer.text).toContain('now-playing 1.0.3')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/просило нарисовать: [1-9]/)
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
