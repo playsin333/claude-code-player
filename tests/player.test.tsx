@@ -231,7 +231,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.3.1')
+  expect(answer.text).toContain('now-playing 1.4.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -508,4 +508,126 @@ test('a surface that runs no live parts draws the equalizer and time itself', as
   expect((await ui.find(TIME))?.text).toBe('1:00 / 3:45')
   expect(await ui.find({ key: 'clock' })).toBeUndefined()
   await ui.unmount()
+})
+
+// Lyrics as LRCLIB keeps them: a tag, two sung lines and a break between.
+const LRC = ['[ar:Lil Peep]', '[00:10.00]раз два три', '[00:12.00]', '[00:20.00]четыре пять'].join('\n')
+
+// Stands for lrclib.net: answers every search with `hits`, noting each address.
+const lrclib = (on: On, hits: object[]): string[] => {
+  const asked: string[] = []
+  on('http.fetch', (_$, e) => {
+    asked.push(e.url)
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify(hits) } }
+  })
+  return asked
+}
+
+const LYRICS_ON = { settings: { top: 'center', size: 'small', bottom: 'model', lyrics: 'on' } }
+
+// Moves the engine's clock and the surface's frame clock on together, as they go.
+const both = async (clock: MockClock, ui: { advance: (ms: number) => Promise<void> }, ms: number): Promise<void> => {
+  await clock.advance(ms)
+  await ui.advance(ms)
+}
+
+test('lyrics stay off until asked for, and nothing is searched', async ($, on) => {
+  const clock = mock.clock(on)
+  const asked = lrclib(on, [{ duration: 225, syncedLyrics: LRC }])
+  await start(on, [COMMANDS, timed(0)], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
+  expect(await ui.find({ key: 'lyrics' })).toBeUndefined()
+  await ui.unmount()
+  expect(asked).toEqual([])
+  expect((await $.command.run(run('debug'))).text).toContain('Текст песни: выкл')
+})
+
+test('with lyrics on, a line comes in word by word as it is sung', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  lrclib(on, [{ duration: 225, syncedLyrics: LRC }])
+  const eight = line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true, position: 8, duration: 225, updatedAt: 1_000_000 })
+  await start(on, [COMMANDS, eight], clock, LYRICS_ON)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect((await $.command.run(run('debug'))).text).toContain('Текст песни: найден, строк: 3')
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const words = async (): Promise<string[]> =>
+    (await ui.findAll({ type: 'Text', in: 'lyrics' })).slice(1).map(word => `${word.text.trim()}${word.props.dimColor ? '·' : ''}`)
+  // Before the first line, the title.
+  expect((await ui.find({ type: 'Text', in: 'lyrics' }))?.text).toBe('Lil Peep — Gym Class')
+
+  await both(clock, ui, 2_000)
+  expect(await words()).toEqual(['раз·'])
+  await both(clock, ui, 500)
+  expect(await words()).toEqual(['раз', 'два·'])
+  await both(clock, ui, 500)
+  expect(await words()).toEqual(['раз', 'два', 'три·'])
+
+  // The break between lines shows the title again, then the next line comes in.
+  await both(clock, ui, 1_000)
+  expect((await ui.find({ type: 'Text', in: 'lyrics' }))?.text).toBe('Lil Peep — Gym Class')
+  await both(clock, ui, 8_000)
+  expect(await words()).toEqual(['четыре·'])
+  await ui.unmount()
+})
+
+test('a paused track holds its line where it is', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  lrclib(on, [{ duration: 225, syncedLyrics: LRC }])
+  const paused = line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: false, position: 10.5, duration: 225, updatedAt: 1_000_000 })
+  await start(on, [COMMANDS, paused], clock, LYRICS_ON)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const shown = async (): Promise<string> => (await ui.find({ type: 'Text', in: 'lyrics' }))?.text ?? ''
+  const before = await shown()
+  await both(clock, ui, 3_000)
+  expect(await shown()).toBe(before)
+  expect((await ui.findAll({ type: 'Text', in: 'lyrics' })).map(word => word.text.trim())).toContain('два')
+  await ui.unmount()
+})
+
+test('lyrics are searched without tags and decoration, and a miss keeps the title', async ($, on) => {
+  const clock = mock.clock(on)
+  const asked = lrclib(on, [{ duration: 225, syncedLyrics: null }])
+  await start(
+    on,
+    [COMMANDS, line({ app: 'Chrome', artist: '☆LiL PEEP☆', title: 'falling 4 me (prod. lederrick x horse head)', isPlaying: true })],
+    clock,
+    LYRICS_ON,
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const first = new URL(asked[0] ?? 'https://lrclib.net').searchParams
+  expect(first.get('track_name')).toBe('falling 4 me')
+  expect(first.get('artist_name')).toBe('LiL PEEP')
+  expect(new URL(asked[1] ?? 'https://lrclib.net').searchParams.get('q')).toBe('LiL PEEP falling 4 me')
+  expect((await $.command.run(run('debug'))).text).toContain('Текст песни: не найден на lrclib.net')
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 'lyrics' })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /falling 4 me/ }))?.text).toBe('☆LiL PEEP☆ — falling 4 me (prod. lederrick x horse head)')
+  await ui.unmount()
+})
+
+test('/player lyrics turns them on and says where they come from', async ($, on) => {
+  const clock = mock.clock(on)
+  const asked = lrclib(on, [{ duration: 225, syncedLyrics: LRC }])
+  await start(on, [COMMANDS, timed(0)], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  expect((await $.command.run(run('lyrics on'))).text).toContain('lrclib.net')
+  await clock.settle()
+  expect(asked).toHaveLength(1)
+  const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
+  expect((await panel.find({ key: 'lyrics-on' }))?.props.variant).toBe('primary')
+  await panel.unmount()
 })

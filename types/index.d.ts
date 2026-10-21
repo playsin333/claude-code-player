@@ -18,6 +18,18 @@ export type Session = Track & { isCurrent: boolean }
 // An app in the panel's sources, with what it plays.
 export type Source = { app: string; text: string }
 
+// One line of synced lyrics: when it starts, in seconds, and its words.
+export type LyricLine = { at: number; text: string }
+
+// The lyrics looked up for the shown track, by its artist and title.
+export type FoundLyrics = {
+  key: string
+  status: 'searching' | 'found' | 'missing' | 'failed'
+  lines: LyricLine[]
+  // Why the search failed, for /player debug.
+  detail?: string
+}
+
 // Where the band above the prompt sits, or off.
 export type TopPlace = 'off' | 'left' | 'center' | 'right'
 
@@ -36,6 +48,9 @@ export type PlayerSettings = {
   bottom: BottomPlace
   controls: Switch
   time: Switch
+  // Synced lyrics from lrclib.net in place of the title; off until asked for,
+  // since the search sends the artist and title there.
+  lyrics: Switch
   // Apps whose sessions the player ignores, by the id Windows gives them.
   hidden: string[]
 }
@@ -51,6 +66,7 @@ declare module 'claude-code' {
       // The apps the sessions come from, changed only when one comes or goes
       // or plays something else.
       sources: Source[]
+      lyrics: FoundLyrics | null
       settings: PlayerSettings
       // The clock at the last animation tick, in ms since the epoch.
       now: number

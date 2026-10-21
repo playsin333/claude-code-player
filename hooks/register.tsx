@@ -1,20 +1,42 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BottomPlace, PlayerSettings, Session, Source, Switch, TextSize, TopPlace, Track } from '../types'
+import type {
+  BottomPlace,
+  FoundLyrics,
+  LyricLine,
+  PlayerSettings,
+  Session,
+  Source,
+  Switch,
+  TextSize,
+  TopPlace,
+  Track,
+} from '../types'
 
 import { EQUALIZER, EQUALIZER_PAUSED, FRAME_MS } from './equalizer'
+import { parseLrc, reveal } from './lyrics'
+import type { LyricsProps } from './lyrics'
 
-const DEFAULTS: PlayerSettings = { top: 'center', size: 'small', bottom: 'model', controls: 'on', time: 'on', hidden: [] }
+const DEFAULTS: PlayerSettings = {
+  top: 'center',
+  size: 'small',
+  bottom: 'model',
+  controls: 'on',
+  time: 'on',
+  lyrics: 'off',
+  hidden: [],
+}
 
 const sessions = atom({ plugin: 'now-playing', key: 'sessions' } as const, [])
 const track = atom({ plugin: 'now-playing', key: 'track' } as const, null)
 const sources = atom({ plugin: 'now-playing', key: 'sources' } as const, [])
+const lyrics = atom({ plugin: 'now-playing', key: 'lyrics' } as const, null)
 const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAULTS)
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.3.1'
+const VERSION = '1.4.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -23,6 +45,14 @@ const LINE_MAX = 60
 // How far the app's report may stray from the time counted on before it is shown.
 const DRIFT_S = 2
 const SOURCE_MAX = 32
+// The lyrics' room in the band, in columns: fixed for the track, so a word
+// coming in moves nothing around it.
+const LYRICS_MIN = 20
+const LYRICS_MAX = 56
+const BAND_OTHERS = 30
+const LRCLIB = 'https://lrclib.net/api/search'
+// How far a found track's length may be from the playing one's, in seconds.
+const DURATION_SLACK_S = 3
 const RESTART_MS = 3000
 const MAX_FAILED_STARTS = 5
 const STDERR_KEPT = 300
@@ -36,6 +66,13 @@ const TOP_LABELS: Record<TopPlace, string> = { off: 'выкл', left: 'слев�
 const SIZE_LABELS: Record<TextSize, string> = { small: 'маленький', normal: 'обычный' }
 const BOTTOM_LABELS: Record<BottomPlace, string> = { off: 'выкл', model: 'вкл' }
 const SWITCH_LABELS: Record<Switch, string> = { off: 'выкл', on: 'вкл' }
+const LYRICS_NOTE = 'Текст ищется на lrclib.net: туда уходят исполнитель и название трека.'
+const LYRICS_STATUS: Record<FoundLyrics['status'], string> = {
+  searching: 'ищется',
+  found: 'найден',
+  missing: 'не найден на lrclib.net',
+  failed: 'ошибка',
+}
 // What `/player bottom` accepts; 1.1.0's `auto` now means the line beside the model.
 const BOTTOM_WORDS: Record<string, BottomPlace> = { off: 'off', on: 'model', model: 'model', auto: 'model' }
 
@@ -142,6 +179,7 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
       bottom: lookup(BOTTOM_WORDS, String(saved.bottom)) ?? DEFAULTS.bottom,
       controls: isOneOf(SWITCHES, saved.controls) ? saved.controls : DEFAULTS.controls,
       time: isOneOf(SWITCHES, saved.time) ? saved.time : DEFAULTS.time,
+      lyrics: isOneOf(SWITCHES, saved.lyrics) ? saved.lyrics : DEFAULTS.lyrics,
       hidden: Array.isArray(saved.hidden) ? saved.hidden.filter((app): app is string => typeof app === 'string') : [],
     }
   }
@@ -176,7 +214,94 @@ const select = async ($: EngineInterface): Promise<void> => {
   const next = pick(all, chosen.hidden, shown?.app) ?? null
   if (!isSame(shown, next, await $.clock.now())) await update($, track, () => next)
   await refreshStatus($)
+  findLyrics($).catch(() => {
+    // The module is unloading; the next load looks again.
+  })
 }
+
+// What LRCLIB is searched by: the title without bracketed tags or features,
+// the first artist without decoration (☆LiL PEEP☆).
+export const searchTerms = (one: Track): { artist: string; title: string } => ({
+  artist: (one.artist.split(/\s*(?:,|&|\bfeat\.?|\bft\.?|\bx\b)\s*/i)[0] ?? '').replace(/[^\p{L}\p{N}\s'.-]/gu, '').trim(),
+  title: one.title
+    .replace(/\s*[([][^)\]]*[)\]]/g, '')
+    .replace(/\s+(?:feat|ft)\.?\s.*$/i, '')
+    .trim(),
+})
+
+type LrclibHit = { syncedLyrics?: string | null; duration?: number }
+
+const searchLrclib = async ($: EngineInterface, query: Record<string, string>): Promise<LrclibHit[]> => {
+  const response = await $.http.fetch(`${LRCLIB}?${new URLSearchParams(query).toString()}`, {
+    headers: { 'User-Agent': `now-playing/${VERSION} (https://github.com/playsin333/claude-code-player)` },
+  })
+  if (!response.ok) throw new Error(`lrclib.net ответил ${response.status}`)
+  const hits = JSON.parse(response.text) as unknown
+  return Array.isArray(hits) ? (hits as LrclibHit[]) : []
+}
+
+// The synced lyrics of the hit nearest the track's length, or of the first
+// hit that has any.
+const bestLines = (hits: readonly LrclibHit[], duration: number | undefined): LyricLine[] => {
+  const synced = hits.filter(hit => typeof hit.syncedLyrics === 'string' && hit.syncedLyrics !== '')
+  const near =
+    duration === undefined || duration < 1
+      ? undefined
+      : synced.find(hit => Math.abs((hit.duration ?? 0) - duration) <= DURATION_SLACK_S)
+  return parseLrc((near ?? synced[0])?.syncedLyrics ?? '')
+}
+
+const lyricsKey = (one: Track): string => `${one.artist}\n${one.title}`
+
+// Lyrics found this session, by track, so a track played again is not searched again.
+const lyricsFound = new Map<string, LyricLine[]>()
+
+// Looks the shown track's lyrics up, once per track, while lyrics are on.
+const findLyrics = async ($: EngineInterface): Promise<void> => {
+  const [chosen, playing, known] = await Promise.all([read($, settings), read($, track), read($, lyrics)])
+  if (chosen.lyrics === 'off' || playing === null) return
+  const key = lyricsKey(playing)
+  if (known?.key === key) return
+
+  let found: FoundLyrics
+  const cached = lyricsFound.get(key)
+  if (cached !== undefined) {
+    found = { key, status: cached.length > 0 ? 'found' : 'missing', lines: cached }
+  } else {
+    await update($, lyrics, (): FoundLyrics => ({ key, status: 'searching', lines: [] }))
+    try {
+      const { artist, title } = searchTerms(playing)
+      const query: Record<string, string> = artist === '' ? { q: title } : { track_name: title, artist_name: artist }
+      let lines = bestLines(await searchLrclib($, query), playing.duration)
+      if (lines.length === 0 && artist !== '') {
+        lines = bestLines(await searchLrclib($, { q: `${artist} ${title}` }), playing.duration)
+      }
+      lyricsFound.set(key, lines)
+      found = { key, status: lines.length > 0 ? 'found' : 'missing', lines }
+    } catch (thrown) {
+      found = { key, status: 'failed', lines: [], detail: thrown instanceof Error ? thrown.message : String(thrown) }
+    }
+  }
+  // Another track may be on by now; its own search writes its lyrics.
+  const current = await read($, track)
+  if (current !== null && lyricsKey(current) === key) await update($, lyrics, () => found)
+}
+
+// The shown track's lines, when lyrics are on and were found for it.
+const linesFor = (chosen: PlayerSettings, playing: Track, sung: FoundLyrics | null): LyricLine[] | undefined =>
+  chosen.lyrics === 'on' && sung?.status === 'found' && sung.key === lyricsKey(playing) ? sung.lines : undefined
+
+// Each props handed to the lyrics gets its own stamp, so it counts on from its own position.
+let lyricsStamps = 0
+
+const lyricsProps = (one: Track, lines: LyricLine[], at: number, size: LyricsProps['size']): LyricsProps => ({
+  lines,
+  position: positionAt(one, at),
+  isPlaying: one.isPlaying,
+  title: trackText(one),
+  size,
+  stamp: (lyricsStamps += 1),
+})
 
 // Lists the reported apps for the panel, leaving the list alone while it stays the same.
 const listSources = async ($: EngineInterface, all: readonly Session[]): Promise<void> => {
@@ -290,6 +415,7 @@ const HELP = [
   '/player bottom off|on             — строчка внизу, у модели',
   '/player buttons off|on            — кнопки над полем ввода',
   '/player time off|on               — время трека',
+  '/player lyrics off|on             — текст песни вместо названия',
   '/player prev|pause|play|next      — управлять музыкой',
   '/player off | on                  — выключить или включить всё',
   '/player debug                     — что происходит внутри (для поиска багов)',
@@ -302,6 +428,7 @@ const summary = (chosen: PlayerSettings): string =>
     `Внизу: ${BOTTOM_LABELS[chosen.bottom]}`,
     `Кнопки: ${SWITCH_LABELS[chosen.controls]}`,
     `Время: ${SWITCH_LABELS[chosen.time]}`,
+    `Текст: ${SWITCH_LABELS[chosen.lyrics]}`,
   ].join(' · ')
 
 // Readable names for the app ids Windows reports, first match wins.
@@ -398,6 +525,10 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
     await choose($, { time: value })
     return `Время трека: ${SWITCH_LABELS[value]}.`
   }
+  if (what === 'lyrics' && isOneOf(SWITCHES, value)) {
+    await choose($, { lyrics: value })
+    return value === 'on' ? `Текст песни: вкл. ${LYRICS_NOTE}` : 'Текст песни: выкл.'
+  }
   if (value !== undefined) return null
 
   const command = lookup(COMMAND_WORDS, what)
@@ -449,11 +580,12 @@ export const register: Register = on => {
     const words = e.args.trim().toLowerCase().split(/\s+/).filter(word => word !== '')
 
     if (words[0] === 'debug') {
-      const [chosen, playing, failure, all] = await Promise.all([
+      const [chosen, playing, failure, all, sung] = await Promise.all([
         read($, settings),
         read($, track),
         read($, error),
         read($, sessions),
+        read($, lyrics),
       ])
       const surfaces = await $.session.surfaces()
       const at = await $.clock.now()
@@ -481,6 +613,14 @@ export const register: Register = on => {
           nowText(playing, failure),
           `Источник как его называет Windows: ${playing?.app ?? '—'}`,
           `Скрытые источники: ${chosen.hidden.length === 0 ? 'нет' : chosen.hidden.join(', ')}`,
+          `Текст песни: ${
+            chosen.lyrics === 'off'
+              ? 'выкл'
+              : sung === null
+                ? '—'
+                : `${LYRICS_STATUS[sung.status]}${sung.status === 'found' ? `, строк: ${sung.lines.length}` : ''}` +
+                  `${sung.detail === undefined ? '' : ` (${sung.detail})`}`
+          }`,
           '',
           `Медиасессии Windows: ${all.length === 0 ? 'нет' : ''}`,
           ...listed,
@@ -574,6 +714,12 @@ export const register: Register = on => {
         {row('Внизу', 'bottom', BOTTOM_PLACES, BOTTOM_LABELS, chosen.bottom)}
         {row('Кнопки', 'controls', SWITCHES, SWITCH_LABELS, chosen.controls)}
         {row('Время трека', 'time', SWITCHES, SWITCH_LABELS, chosen.time)}
+        <Box flexDirection="column">
+          {row('Текст песни вместо названия', 'lyrics', SWITCHES, SWITCH_LABELS, chosen.lyrics)}
+          <Text dimColor size="caption">
+            {LYRICS_NOTE}
+          </Text>
+        </Box>
         {apps.length === 0 ? null : (
           <Box flexDirection="column">
             <Text dimColor>Источники: выделенные показываются, нажми, чтобы скрыть или вернуть</Text>
@@ -596,13 +742,20 @@ export const register: Register = on => {
     )
   })
 
-  // The band's clock asks for the time twice a second; the answer is its next props.
+  // The band's clock and lyrics ask for the time; the answer is their next props.
   on('ui.message', async ($, e, next) => {
-    if (e.element !== 'clock') return next(e)
+    if (e.element !== 'clock' && e.element !== 'lyrics') return next(e)
+    const [chosen, playing, sung] = await Promise.all([read($, settings), read($, track), read($, lyrics)])
+    if (playing === null) return next(e)
+    const [at, size] = [await $.clock.now(), TEXT_SIZE[chosen.size]]
+
+    if (e.element === 'lyrics') {
+      const lines = linesFor(chosen, playing, sung)
+      return lines === undefined ? next(e) : { props: lyricsProps(playing, lines, at, size) }
+    }
     seen.clockAsks += 1
-    const [chosen, playing] = await Promise.all([read($, settings), read($, track)])
-    const time = playing === null ? undefined : timeText(playing, await $.clock.now())
-    return time === undefined ? next(e) : { props: { time, size: TEXT_SIZE[chosen.size] } }
+    const time = timeText(playing, at)
+    return time === undefined ? next(e) : { props: { time, size } }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -612,10 +765,11 @@ export const register: Register = on => {
     // reads no clock: it is drawn again only when the track, its state or a
     // setting changes, and a button under the pointer stays as it is.
     const isLive = LIVE_SURFACES.includes(e.surface)
-    const [chosen, playing, at] = await Promise.all([
+    const [chosen, playing, at, sung] = await Promise.all([
       read($, settings),
       read($, track),
       isLive ? $.clock.now() : read($, now),
+      read($, lyrics),
     ])
     // Whatever other plugins put in the band stays; the player goes under it.
     const others = await next(e)
@@ -632,6 +786,7 @@ export const register: Register = on => {
       const Client = isLive && 'Client' in table ? table.Client : undefined
       const size = TEXT_SIZE[chosen.size]
       const time = chosen.time === 'on' ? timeText(playing, at) : undefined
+      const lines = linesFor(chosen, playing, sung)
       const controls =
         chosen.controls === 'on' ? (
           <Box key="controls" flexDirection="row" gap="xs">
@@ -659,9 +814,22 @@ export const register: Register = on => {
           ) : (
             <Client key="equalizer" module="./equalizer.tsx" props={{ isPlaying: playing.isPlaying, size }} />
           )}
-          <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
-            {trackText(playing)}
-          </Text>
+          {lines === undefined ? (
+            <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
+              {trackText(playing)}
+            </Text>
+          ) : Client === undefined ? (
+            <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
+              {(reveal(lines, positionAt(playing, at)) ?? [{ text: trackText(playing) }]).map(word => word.text).join('')}
+            </Text>
+          ) : (
+            <Client
+              key="lyrics"
+              module="./lyrics.tsx"
+              width={Math.max(LYRICS_MIN, Math.min(LYRICS_MAX, e.props.bodyColumns - BAND_OTHERS))}
+              props={lyricsProps(playing, lines, at, size)}
+            />
+          )}
           {time === undefined ? null : Client === undefined ? (
             <Text size={size} dimColor tabular>
               {time}
