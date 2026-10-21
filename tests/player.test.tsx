@@ -71,6 +71,18 @@ test('the band shows the cleaned track', async ($, on) => {
   await ui.unmount()
 })
 
+test('the band keeps what other plugins draw there', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /engine/ }))?.text).toBe('engine')
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  await ui.unmount()
+})
+
 test('a JSON line split across pieces is still read', async ($, on) => {
   const clock = mock.clock(on)
   const whole = line({ app: 'Spotify.exe', artist: 'Скриптонит', title: 'Положение', isPlaying: false })

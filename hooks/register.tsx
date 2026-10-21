@@ -187,19 +187,24 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const [current, playing, at] = await Promise.all([read($, mode), read($, track), read($, frame)])
+    // Whatever other plugins put in the band stays; the player goes under it.
+    const others = await next(e)
 
     if (e.props.hasSurvey || playing === null || !showsBar(current)) {
-      return next(e)
+      return others
     }
 
     const { Box, Text } = $.ui.resolve(e)
     const isPaused = !playing.isPlaying
 
     return (
-      <Box justifyContent="center" width="100%">
-        <Text dimColor={isPaused} wrap="truncate-end">
-          {equalizer(playing, at)}  {trackText(playing)}
-        </Text>
+      <Box flexDirection="column" width="100%">
+        {others}
+        <Box justifyContent="center" width="100%">
+          <Text dimColor={isPaused} wrap="truncate-end">
+            {equalizer(playing, at)}  {trackText(playing)}
+          </Text>
+        </Box>
       </Box>
     )
   })
