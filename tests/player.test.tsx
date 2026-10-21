@@ -15,6 +15,18 @@ const BAND = {
   },
 } as const
 
+const PANEL = {
+  plugin: 'now-playing',
+  component: 'CommandOutput',
+  props: { command: 'player', args: '', text: '', isErrored: false },
+} as const
+
+const MODE = {
+  plugin: 'now-playing',
+  component: 'SessionMode',
+  props: { modes: ['Auto'] },
+} as const
+
 const run = (args: string) => ({
   command: 'player',
   args,
@@ -23,6 +35,8 @@ const run = (args: string) => ({
 })
 
 const line = (track: object | null): string => `${JSON.stringify({ track })}\r\n`
+
+const GYM_CLASS = line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })
 
 // Stands for the engine beneath the plugin: a helper that prints `lines`,
 // then stays alive until the clock passes a minute.
@@ -46,35 +60,36 @@ const start = async (
     await clock.sleep(60_000)
     return { value: { code: 0, signal: null } }
   })
-  // The engine's own band, drawn when the plugin has nothing to show.
+  // The engine's own drawings: the mode labels joined, anything else a stand-in.
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
+    if (e.component === 'SessionMode') return <Text>{e.props.modes.join(' & ')}</Text>
     return <Text>engine</Text>
   })
   return statuses
 }
 
-test('the band shows the cleaned track', async ($, on) => {
+test('the band shows the cleaned track, small and centered by default', async ($, on) => {
   const clock = mock.clock(on)
   await start(
     on,
-    [
-      line({ app: 'chrome.exe', artist: '', title: 'Lil Peep - Gym Class (Official Video)', isPlaying: true }),
-    ],
+    [line({ app: 'chrome.exe', artist: '', title: 'Lil Peep - Gym Class (Official Video)', isPlaying: true })],
     clock,
   )
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const row = await ui.find({ type: 'Text', text: /Gym Class/ })
-  expect(row?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  const text = await ui.find({ type: 'Text', text: /Gym Class/ })
+  expect(text?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  expect(text?.props.size).toBe('caption')
+  expect((await ui.find({ key: 'player' }))?.props.justifyContent).toBe('center')
   await ui.unmount()
 })
 
 test('the band keeps what other plugins draw there', async ($, on) => {
   const clock = mock.clock(on)
-  await start(on, [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })], clock)
+  await start(on, [GYM_CLASS], clock)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.settle()
 
@@ -92,49 +107,99 @@ test('a JSON line split across pieces is still read', async ($, on) => {
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const row = await ui.find({ type: 'Text', text: /Положение/ })
-  expect(row?.text).toBe('▁▁▁  Скриптонит — Положение')
+  expect((await ui.find({ type: 'Text', text: /Положение/ }))?.text).toBe('▁▁▁  Скриптонит — Положение')
   await ui.unmount()
 })
 
-test('/player line moves the player to the status line', async ($, on) => {
+test('/player top and size move and resize the band', async ($, on) => {
   const clock = mock.clock(on)
-  const statuses = await start(
-    on,
-    [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })],
-    clock,
-  )
+  await start(on, [GYM_CLASS], clock)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.settle()
 
-  const answer = await $.command.run(run('line'))
-  expect(answer.text).toContain('строчкой')
+  expect((await $.command.run(run('top right'))).text).toContain('справа')
+  expect((await $.command.run(run('size normal'))).text).toContain('обычный')
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ key: 'player' }))?.props.justifyContent).toBe('flex-end')
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.props.size).toBe('body')
+  await ui.unmount()
+
+  await $.command.run(run('top off'))
+  const hidden = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await hidden.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
+  await hidden.unmount()
+})
+
+test('the bottom line goes beside the model or beside Auto', async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses = await start(on, [GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
   expect(statuses.at(-1)).toContain('Lil Peep — Gym Class')
 
-  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
-  await ui.unmount()
+  const before = await $.ui.mount({ ...MODE, surface: 'desktop' })
+  expect((await before.find({ type: 'Text', text: /Auto/ }))?.text).toBe('Auto')
+  await before.unmount()
+
+  await $.command.run(run('bottom auto'))
+  expect(statuses.at(-1)).toBe('')
+
+  const after = await $.ui.mount({ ...MODE, surface: 'desktop' })
+  expect((await after.find({ type: 'Text', text: /Auto/ }))?.text).toBe('Auto & ▂▅▃  Lil Peep — Gym Class')
+  await after.unmount()
 })
 
-test('a mode saved earlier is used from the start', async ($, on) => {
+test('the /player panel changes settings with its buttons', async ($, on) => {
   const clock = mock.clock(on)
-  await start(
-    on,
-    [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })],
-    clock,
-    { mode: 'off' },
-  )
+  await start(on, [GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
+  expect((await panel.find({ type: 'Text', text: /Играет/ }))?.text).toBe('Играет: Lil Peep — Gym Class (Spotify.exe)')
+  expect((await panel.find({ key: 'top-center' }))?.props.variant).toBe('primary')
+  await panel.press({ key: 'top-left' })
+  expect((await panel.find({ key: 'top-left' }))?.props.variant).toBe('primary')
+  await panel.unmount()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ key: 'player' }))?.props.justifyContent).toBe('flex-start')
+  await band.unmount()
+})
+
+test('settings saved by 1.0 carry over', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [GYM_CLASS], clock, { mode: 'line' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
   await ui.unmount()
+
+  expect((await $.command.run(run(''))).text).toContain('Над полем: выкл · Размер: маленький · Внизу: у модели')
 })
 
-test('/player debug reports what the band hook saw', async ($, on) => {
+test('/player off hides everything and /player on brings it back', async ($, on) => {
   const clock = mock.clock(on)
-  await start(on, [line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })], clock)
+  const statuses = await start(on, [GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  await $.command.run(run('off'))
+  expect(statuses.at(-1)).toBe('')
+  const hidden = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await hidden.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
+  await hidden.unmount()
+
+  await $.command.run(run('on'))
+  expect(statuses.at(-1)).toContain('Lil Peep — Gym Class')
+})
+
+test('/player debug reports what the drawings saw', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [GYM_CLASS], clock)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.settle()
 
@@ -142,12 +207,22 @@ test('/player debug reports what the band hook saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.0.3')
+  expect(answer.text).toContain('now-playing 1.1.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
-  expect(answer.text).toMatch(/просило нарисовать: [1-9]/)
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
   expect(answer.text).toContain('Поверхности сессии: desktop')
+})
+
+test('an unknown /player word gets the help', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const answer = await $.command.run(run('top sideways'))
+  expect(answer.text).toContain('Не знаю «top sideways»')
+  expect(answer.text).toContain('/player top off|left|center|right')
 })
 
 test('/player says when the helper ends without a word', async ($, on) => {
