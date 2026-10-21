@@ -233,7 +233,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.8.0')
+  expect(answer.text).toContain('now-playing 2.0.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -696,7 +696,7 @@ test('/player bug gives the form and a report without the user folder; the panel
 
   const answer = (await $.command.run(run('bug'))).text ?? ''
   expect(answer).toContain('https://github.com/playsin333/claude-code-player/issues/new?template=bug.yml')
-  expect(answer).toContain('now-playing 1.')
+  expect(answer).toMatch(/now-playing \d+\.\d+\.\d+/)
   expect(answer).toContain('файл команд: %USERPROFILE%\\AppData\\Local\\Temp\\now-playing-1.cmd')
   expect(answer).not.toContain('Петя')
 
@@ -898,4 +898,134 @@ test('while another window counts, this one does not count the same music twice'
   // The other window went quiet: after its claim runs out, this one counts.
   await clock.advance(120_000)
   expect((await $.command.run(run('stats'))).text).toContain('Lil Peep — Gym Class · 1 мин')
+})
+
+// What a command answers, for a stand-in of $.process.run.
+type Ran = { exitCode: number; stdout: string; stderr?: string }
+
+// Stands for the host's commands: answers each as `answer` says, noting them.
+const commands = (on: On, answer: (argv: readonly string[]) => Ran): string[][] => {
+  const asked: string[][] = []
+  on('process.run', (_$, e) => {
+    asked.push([...e.argv])
+    const { exitCode, stdout, stderr = '' } = answer(e.argv)
+    return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  return asked
+}
+
+// busctl's own output for two players, as a session bus gave it: one with a
+// position, one without (its call fails after printing the rest).
+const BUS_NAMES =
+  '{"type":"as","data":[["org.freedesktop.DBus","org.mpris.MediaPlayer2.fakeplayer","org.mpris.MediaPlayer2.noposition.instance42",":1.0"]]}\n'
+const busPlayer = (status: string, title: string): string =>
+  `{"type":"s","data":"${status}"}\n` +
+  `{"type":"a{sv}","data":{"mpris:trackid":{"type":"o","data":"/org/mpris/MediaPlayer2/Track/1"},"xesam:title":{"type":"s","data":"${title}"},"xesam:artist":{"type":"as","data":["Lil Peep","Lil Tracy"]},"mpris:length":{"type":"x","data":225000000}}}\n`
+const BUS_POSITION = '{"type":"x","data":61000000}\n'
+
+// A Linux session bus with those two players, the second paused; PlayPause
+// pauses the first.
+const linuxBus = (on: On): string[][] => {
+  let status = 'Playing'
+  return commands(on, argv => {
+    if (argv[0] === 'uname') return { exitCode: 0, stdout: 'Linux\n' }
+    if (argv.includes('ListNames')) return { exitCode: 0, stdout: BUS_NAMES }
+    if (argv.includes('get-property') && argv.includes('org.mpris.MediaPlayer2.fakeplayer')) {
+      return { exitCode: 0, stdout: busPlayer(status, 'Gym Class') + BUS_POSITION }
+    }
+    if (argv.includes('get-property')) {
+      return { exitCode: 1, stdout: busPlayer('Paused', 'Положение'), stderr: "No such property: 'Position'" }
+    }
+    if (argv.includes('PlayPause')) {
+      status = status === 'Playing' ? 'Paused' : 'Playing'
+      return { exitCode: 0, stdout: '' }
+    }
+    return { exitCode: 1, stdout: '', stderr: `not expected: ${argv.join(' ')}` }
+  })
+}
+
+test('on Linux the player reads the MPRIS players through busctl', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  linuxBus(on)
+  await start(on, [], clock)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep, Lil Tracy — Gym Class')
+  expect((await ui.find(LIVE_TIME))?.text).toBe('1:01 / 3:45')
+  await ui.unmount()
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'terminal' })
+  expect((await panel.find({ key: 'source-noposition.instance42' }))?.props.label).toBe(
+    'noposition: Lil Peep, Lil Tracy — Положение',
+  )
+  await panel.unmount()
+
+  const debug = (await $.command.run(run('debug'))).text ?? ''
+  expect(debug).toContain('Система: Linux')
+  expect(debug).toContain('эквалайзер: свои кадры, громкость не читается (живой есть только на Windows)')
+})
+
+test('on Linux a button calls the player over D-Bus, and what it did shows at once', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const asked = linuxBus(on)
+  await start(on, [], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'toggle' })
+  await clock.settle()
+  expect(asked).toContainEqual([
+    'busctl',
+    '--user',
+    '--json=short',
+    'call',
+    'org.mpris.MediaPlayer2.fakeplayer',
+    '/org/mpris/MediaPlayer2',
+    'org.mpris.MediaPlayer2.Player',
+    'PlayPause',
+  ])
+  expect((await ui.find({ key: 'toggle' }))?.props.label).toBe('▶︎')
+  await ui.unmount()
+  expect((await $.command.run(run('debug'))).text).toContain('toggle в fakeplayer: приложение выполнило')
+})
+
+test('on Linux without busctl the player says what it needs', async ($, on) => {
+  const clock = mock.clock(on)
+  on('process.run', (_$, e) => {
+    if (e.argv[0] === 'uname') return { value: { exitCode: 0, stdout: 'Linux\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    throw new Error('busctl: not found')
+  })
+  await start(on, [], clock)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const answer = (await $.command.run(run(''))).text ?? ''
+  expect(answer).toContain('не получилось спросить плееры через busctl')
+  expect(answer).toContain('MPRIS')
+})
+
+test('on a Mac Spotify is read and pressed through osascript', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const spotify = [{ app: 'Spotify', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true, position: 61, duration: 225 }]
+  const asked = commands(on, argv => {
+    if (argv[0] === 'uname') return { exitCode: 0, stdout: 'Darwin\n' }
+    if (argv[0] === 'osascript' && String(argv.at(-1)).includes('playerState')) {
+      return { exitCode: 0, stdout: `${JSON.stringify(spotify)}\n` }
+    }
+    if (argv[0] === 'osascript') return { exitCode: 0, stdout: '' }
+    return { exitCode: 1, stdout: '', stderr: 'not expected' }
+  })
+  await start(on, [], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
+  await ui.press({ key: 'next' })
+  await ui.unmount()
+  expect(asked.some(argv => argv.at(-1) === 'Application("Spotify").nextTrack()')).toBe(true)
+  expect((await $.command.run(run('debug'))).text).toContain('Система: macOS (экспериментально)')
 })
