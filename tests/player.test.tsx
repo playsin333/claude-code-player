@@ -231,7 +231,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.4.1')
+  expect(answer.text).toContain('now-playing 1.5.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -678,4 +678,26 @@ test('an app that reports no time keeps counting through reports about other app
 
   await clock.advance(5_100)
   expect(statuses.at(-1)).toContain('Lil Peep — Gym Class  0:05 / 3:20')
+})
+
+test('/player bug gives the form and a report without the user folder; the panel links both forms', async ($, on) => {
+  const clock = mock.clock(on)
+  const windowsFile = `${JSON.stringify({ commands: 'C:\\Users\\Петя\\AppData\\Local\\Temp\\now-playing-1.cmd' })}\r\n`
+  await start(on, [windowsFile, GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const answer = (await $.command.run(run('bug'))).text ?? ''
+  expect(answer).toContain('https://github.com/playsin333/claude-code-player/issues/new?template=bug.yml')
+  expect(answer).toContain('now-playing 1.')
+  expect(answer).toContain('файл команд: %USERPROFILE%\\AppData\\Local\\Temp\\now-playing-1.cmd')
+  expect(answer).not.toContain('Петя')
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
+  const links = (await panel.findAll({ type: 'Link' })).map(link => String(link.props.href))
+  expect(links).toEqual([
+    'https://github.com/playsin333/claude-code-player/issues/new?template=bug.yml',
+    'https://github.com/playsin333/claude-code-player/issues/new?template=question.yml',
+  ])
+  await panel.unmount()
 })

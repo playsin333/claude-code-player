@@ -36,7 +36,7 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.4.1'
+const VERSION = '1.5.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -51,6 +51,9 @@ const LYRICS_MIN = 20
 const LYRICS_MAX = 56
 const BAND_OTHERS = 30
 const LRCLIB = 'https://lrclib.net/api/search'
+// Where bugs and questions go: the repository's issues, with a form for each.
+const ISSUES = 'https://github.com/playsin333/claude-code-player/issues'
+const BUG_INTRO = 'Чтобы сообщить о баге, открой форму и вставь в поле «Диагностика» всё, что ниже ссылки:'
 // How far a found track's length may be from the playing one's, in seconds:
 // the nearest within SLACK first, and none past FAR, another version's timing.
 const DURATION_SLACK_S = 3
@@ -429,6 +432,7 @@ const HELP = [
   '/player prev|pause|play|next      — управлять музыкой',
   '/player off | on                  — выключить или включить всё',
   '/player debug                     — что происходит внутри (для поиска багов)',
+  '/player bug                       — сообщить о баге: ссылка на форму и диагностика',
 ].join('\n')
 
 const summary = (chosen: PlayerSettings): string =>
@@ -509,6 +513,72 @@ const press = async ($: EngineInterface, command: Command): Promise<string> => {
   }
 }
 
+// What /player debug says: what the player sees, chose and drew, for finding bugs.
+const debugText = async ($: EngineInterface): Promise<string> => {
+  const [chosen, playing, failure, all, sung] = await Promise.all([
+    read($, settings),
+    read($, track),
+    read($, error),
+    read($, sessions),
+    read($, lyrics),
+  ])
+  const surfaces = await $.session.surfaces()
+  const at = await $.clock.now()
+  const listed = all.map(one => {
+    const marks = [
+      one.isPlaying ? 'играет' : 'пауза',
+      ...(one.isCurrent ? ['текущая в Windows'] : []),
+      ...(chosen.hidden.includes(one.app) ? ['скрыта'] : []),
+      ...(one.app === playing?.app && one.title === playing.title ? ['показана'] : []),
+    ]
+    return `  ${appName(one.app)} (${one.app}), ${marks.join(', ')}: ${trackText(one)}`
+  })
+  // The app's own last report, which `track` follows only when it strays.
+  const raw = all.find(one => one.app === playing?.app && one.title === playing.title) ?? playing
+  const timeline =
+    raw === null
+      ? '—'
+      : `позиция ${raw.position ?? '—'} с, длина ${raw.duration ?? '—'} с, ` +
+        `сообщено ${Math.round((at - (raw.updatedAt ?? at)) / 1000)} с назад`
+  return [
+      `now-playing ${VERSION}`,
+      `Поверхности сессии: ${surfaces.length === 0 ? 'нет' : surfaces.join(', ')}`,
+      summary(chosen),
+      nowText(playing, failure),
+      `Источник как его называет Windows: ${playing?.app ?? '—'}`,
+      `Скрытые источники: ${chosen.hidden.length === 0 ? 'нет' : chosen.hidden.join(', ')}`,
+      `Текст песни: ${
+        chosen.lyrics === 'off'
+          ? 'выкл'
+          : sung === null
+            ? '—'
+            : `${LYRICS_STATUS[sung.status]}${sung.status === 'found' ? `, строк: ${sung.lines.length}` : ''}` +
+              `${sung.detail === undefined ? '' : ` (${sung.detail})`}`
+      }`,
+      '',
+      all.length === 0 ? 'Медиасессии Windows: нет' : 'Медиасессии Windows:',
+      ...listed,
+      '',
+      'Полоса над полем ввода:',
+      `  приложение просило нарисовать: ${seen.bandCalls} раз`,
+      `  плеер нарисован: ${seen.bandDrawn} раз`,
+      `  последняя поверхность: ${seen.bandSurface}`,
+      `  под плеером: ${seen.bandBelow}`,
+      `  последний раз не рисовал, потому что: ${seen.bandSkipped}`,
+      `  ошибка: ${seen.bandFailure}`,
+      `  часы спрашивали время: ${seen.clockAsks} раз`,
+      '',
+      `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
+      '',
+      'Управление и время:',
+      `  файл команд: ${commandFile ?? 'нет'}`,
+      `  последняя команда: ${seen.lastCommand}`,
+      `  ответ: ${seen.lastAnswer}`,
+      `  ошибка: ${seen.controlFailure}`,
+      `  время от Windows: ${timeline}`,
+  ].join('\n')
+}
+
 // Applies `/player <args>`; answers what changed, or null when it means nothing.
 const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | null> => {
   const [what, value] = words
@@ -569,7 +639,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'player',
       description: 'Плеер: что играет и где его показывать',
-      argumentHint: '[next|pause|play|prev|top|size|bottom|buttons|time|off|on|debug]',
+      argumentHint: '[next|pause|play|prev|top|size|bottom|buttons|time|lyrics|off|on|debug|bug]',
     })
 
     // Animates the equalizer only while something plays and is on screen.
@@ -589,71 +659,11 @@ export const register: Register = on => {
   on('command.run', { command: 'player' }, async ($, e) => {
     const words = e.args.trim().toLowerCase().split(/\s+/).filter(word => word !== '')
 
-    if (words[0] === 'debug') {
-      const [chosen, playing, failure, all, sung] = await Promise.all([
-        read($, settings),
-        read($, track),
-        read($, error),
-        read($, sessions),
-        read($, lyrics),
-      ])
-      const surfaces = await $.session.surfaces()
-      const at = await $.clock.now()
-      const listed = all.map(one => {
-        const marks = [
-          one.isPlaying ? 'играет' : 'пауза',
-          ...(one.isCurrent ? ['текущая в Windows'] : []),
-          ...(chosen.hidden.includes(one.app) ? ['скрыта'] : []),
-          ...(one.app === playing?.app && one.title === playing.title ? ['показана'] : []),
-        ]
-        return `  ${appName(one.app)} (${one.app}), ${marks.join(', ')}: ${trackText(one)}`
-      })
-      // The app's own last report, which `track` follows only when it strays.
-      const raw = all.find(one => one.app === playing?.app && one.title === playing.title) ?? playing
-      const timeline =
-        raw === null
-          ? '—'
-          : `позиция ${raw.position ?? '—'} с, длина ${raw.duration ?? '—'} с, ` +
-            `сообщено ${Math.round((at - (raw.updatedAt ?? at)) / 1000)} с назад`
-      return {
-        text: [
-          `now-playing ${VERSION}`,
-          `Поверхности сессии: ${surfaces.length === 0 ? 'нет' : surfaces.join(', ')}`,
-          summary(chosen),
-          nowText(playing, failure),
-          `Источник как его называет Windows: ${playing?.app ?? '—'}`,
-          `Скрытые источники: ${chosen.hidden.length === 0 ? 'нет' : chosen.hidden.join(', ')}`,
-          `Текст песни: ${
-            chosen.lyrics === 'off'
-              ? 'выкл'
-              : sung === null
-                ? '—'
-                : `${LYRICS_STATUS[sung.status]}${sung.status === 'found' ? `, строк: ${sung.lines.length}` : ''}` +
-                  `${sung.detail === undefined ? '' : ` (${sung.detail})`}`
-          }`,
-          '',
-          all.length === 0 ? 'Медиасессии Windows: нет' : 'Медиасессии Windows:',
-          ...listed,
-          '',
-          'Полоса над полем ввода:',
-          `  приложение просило нарисовать: ${seen.bandCalls} раз`,
-          `  плеер нарисован: ${seen.bandDrawn} раз`,
-          `  последняя поверхность: ${seen.bandSurface}`,
-          `  под плеером: ${seen.bandBelow}`,
-          `  последний раз не рисовал, потому что: ${seen.bandSkipped}`,
-          `  ошибка: ${seen.bandFailure}`,
-          `  часы спрашивали время: ${seen.clockAsks} раз`,
-          '',
-          `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
-          '',
-          'Управление и время:',
-          `  файл команд: ${commandFile ?? 'нет'}`,
-          `  последняя команда: ${seen.lastCommand}`,
-          `  ответ: ${seen.lastAnswer}`,
-          `  ошибка: ${seen.controlFailure}`,
-          `  время от Windows: ${timeline}`,
-        ].join('\n'),
-      }
+    if (words[0] === 'debug') return { text: await debugText($) }
+    if (words[0] === 'bug') {
+      // The user's folder names them; a report is public.
+      const report = (await debugText($)).replace(/[A-Za-z]:\\Users\\[^\\]+/g, '%USERPROFILE%')
+      return { text: `${BUG_INTRO}\n${ISSUES}/new?template=bug.yml\n\n${report}` }
     }
 
     if (words.length > 0) {
@@ -675,7 +685,7 @@ export const register: Register = on => {
       read($, error),
       read($, sources),
     ])
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
     // The apps playing now, and the hidden ones so they can come back.
     const apps = [...new Set([...listed.map(one => one.app), ...chosen.hidden])]
 
@@ -748,6 +758,10 @@ export const register: Register = on => {
             </Box>
           </Box>
         )}
+        <Box flexDirection="row" gap="sm">
+          <Link href={`${ISSUES}/new?template=bug.yml`} label="Сообщить о баге" />
+          <Link href={`${ISSUES}/new?template=question.yml`} label="Вопрос или идея" />
+        </Box>
       </Box>
     )
   })

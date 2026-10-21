@@ -6,7 +6,7 @@
 
 Трек из любого приложения: Spotify, Яндекс Музыка, ВК, SoundCloud, Telegram, скачанная музыка.
 
-![version](https://img.shields.io/badge/version-1.4.1-d97757)
+![version](https://img.shields.io/badge/version-1.5.0-d97757)
 ![platform](https://img.shields.io/badge/platform-Windows-3d3c38)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-3d3c38)
 ![license](https://img.shields.io/badge/license-MIT-3d3c38)
@@ -74,6 +74,7 @@
 | `/player next` / `prev` / `pause` / `play` | управлять музыкой |
 | `/player off` / `/player on` | выключить или включить всё |
 | `/player debug` | что происходит внутри, для поиска багов |
+| `/player bug` | сообщить о баге: ссылка на форму и диагностика для неё |
 
 ## Как это устроено
 
@@ -88,6 +89,15 @@ hooks/lyrics.tsx         текст песни, который появляет�
 types/index.d.ts         типы состояния плеера
 tests/                   тесты (claude plugin test .)
 ```
+
+## Баги, вопросы, идеи
+
+Пиши в [Issues](https://github.com/playsin333/claude-code-player/issues), там на каждую тему своё обсуждение:
+
+- [сообщить о баге](https://github.com/playsin333/claude-code-player/issues/new?template=bug.yml): проще всего сначала набрать в Claude `/player bug` и вставить в форму то, что он ответит;
+- [задать вопрос или предложить идею](https://github.com/playsin333/claude-code-player/issues/new?template=question.yml).
+
+Обе ссылки есть и внизу панели `/player`.
 
 ## Планы
 

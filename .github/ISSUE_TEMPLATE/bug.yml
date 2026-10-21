@@ -1,0 +1,37 @@
+name: Баг
+description: Что-то работает не так, как должно
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что пишешь. Быстрее всего помогает вывод `/player debug`: проще всего набрать в Claude `/player bug` и скопировать всё, что он ответит, в поле «Диагностика».
+  - type: textarea
+    id: what
+    attributes:
+      label: Что случилось
+      description: Что ты делал, что ожидал увидеть и что увидел на самом деле.
+    validations:
+      required: true
+  - type: textarea
+    id: debug
+    attributes:
+      label: Диагностика
+      description: Вывод `/player bug` или `/player debug`. Там видно названия треков, которые играют, если не хочешь их показывать, замени их.
+      render: text
+  - type: dropdown
+    id: where
+    attributes:
+      label: Где запускаешь Claude
+      options:
+        - Приложение Claude (десктоп)
+        - Терминал
+        - VS Code
+        - Другое
+    validations:
+      required: true
+  - type: textarea
+    id: screenshot
+    attributes:
+      label: Скриншот
+      description: Если баг видно на экране, перетащи сюда картинку.

@@ -1,0 +1,10 @@
+name: Вопрос или идея
+description: Спросить, как что-то сделать, или предложить, что добавить
+labels: [question]
+body:
+  - type: textarea
+    id: text
+    attributes:
+      label: Вопрос или идея
+    validations:
+      required: true
