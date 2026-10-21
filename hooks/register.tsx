@@ -5,6 +5,7 @@ import type {
   BottomPlace,
   FoundLyrics,
   LyricLine,
+  Palette,
   PlayerSettings,
   Session,
   Source,
@@ -14,10 +15,13 @@ import type {
   Track,
 } from '../types'
 
-import { EQUALIZER, EQUALIZER_PAUSED, FRAME_MS } from './equalizer'
+import { PICKER_HUES, hueStrip, paletteColors, paletteSample, parseHex, shadeStrip } from './colors'
+import type { Colors } from './colors'
+import { EQUALIZER, EQUALIZER_PAUSED, FRAME_MS, barColor } from './equalizer'
 import type { EqualizerProps } from './equalizer'
 import { parseLrc, reveal } from './lyrics'
 import type { LyricsProps } from './lyrics'
+import type { PickerClick, PickerProps } from './picker'
 
 const DEFAULTS: PlayerSettings = {
   top: 'center',
@@ -26,6 +30,8 @@ const DEFAULTS: PlayerSettings = {
   controls: 'on',
   time: 'on',
   lyrics: 'off',
+  palette: 'claude',
+  color: '#5ab0ff',
   hidden: [],
 }
 
@@ -37,11 +43,12 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.6.0'
+const VERSION = '1.7.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
 const SWITCHES: readonly Switch[] = ['off', 'on']
+const PALETTES: readonly Palette[] = ['mono', 'claude', 'neon', 'sunset', 'rgb', 'custom']
 const LINE_MAX = 60
 // How far the app's report may stray from the time counted on before it is shown.
 const DRIFT_S = 2
@@ -83,6 +90,30 @@ const TOP_LABELS: Record<TopPlace, string> = { off: 'выкл', left: 'слев�
 const SIZE_LABELS: Record<TextSize, string> = { small: 'маленький', normal: 'обычный' }
 const BOTTOM_LABELS: Record<BottomPlace, string> = { off: 'выкл', model: 'вкл' }
 const SWITCH_LABELS: Record<Switch, string> = { off: 'выкл', on: 'вкл' }
+const PALETTE_LABELS: Record<Palette, string> = {
+  mono: 'без цвета',
+  claude: 'Claude',
+  neon: 'Неон',
+  sunset: 'Закат',
+  rgb: 'RGB',
+  custom: 'свой',
+}
+// What `/player color` accepts besides a #hex.
+const PALETTE_WORDS: Record<string, Palette> = {
+  mono: 'mono',
+  none: 'mono',
+  off: 'mono',
+  claude: 'claude',
+  neon: 'neon',
+  неон: 'neon',
+  sunset: 'sunset',
+  закат: 'sunset',
+  rgb: 'rgb',
+  rainbow: 'rgb',
+  радуга: 'rgb',
+  custom: 'custom',
+  свой: 'custom',
+}
 const LYRICS_NOTE = 'Текст ищется на lrclib.net: туда уходят исполнитель и название трека.'
 const LYRICS_STATUS: Record<FoundLyrics['status'], string> = {
   searching: 'ищется',
@@ -168,9 +199,11 @@ const equalizer = (one: Track, at: number): string =>
     ? (liveBars(at) ?? EQUALIZER[Math.floor(at / FRAME_MS) % EQUALIZER.length] ?? EQUALIZER_PAUSED)
     : EQUALIZER_PAUSED
 
-const equalizerProps = (one: Track, at: number, size: EqualizerProps['size']): EqualizerProps => {
+const colorsOf = (chosen: PlayerSettings): Colors => paletteColors(chosen.palette, chosen.color)
+
+const equalizerProps = (one: Track, at: number, size: EqualizerProps['size'], colors: Colors): EqualizerProps => {
   const bars = liveBars(at)
-  return { isPlaying: one.isPlaying, size, ...(bars === undefined ? {} : { bars }) }
+  return { isPlaying: one.isPlaying, size, colors: colors.bars, ...(bars === undefined ? {} : { bars }) }
 }
 
 const clip = (text: string, max: number): string =>
@@ -226,6 +259,8 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
       controls: isOneOf(SWITCHES, saved.controls) ? saved.controls : DEFAULTS.controls,
       time: isOneOf(SWITCHES, saved.time) ? saved.time : DEFAULTS.time,
       lyrics: isOneOf(SWITCHES, saved.lyrics) ? saved.lyrics : DEFAULTS.lyrics,
+      palette: isOneOf(PALETTES, saved.palette) ? saved.palette : DEFAULTS.palette,
+      color: parseHex(String(saved.color)) ?? DEFAULTS.color,
       hidden: Array.isArray(saved.hidden) ? saved.hidden.filter((app): app is string => typeof app === 'string') : [],
     }
   }
@@ -342,14 +377,36 @@ const linesFor = (chosen: PlayerSettings, playing: Track, sung: FoundLyrics | nu
 // Each props handed to the lyrics gets its own stamp, so it counts on from its own position.
 let lyricsStamps = 0
 
-const lyricsProps = (one: Track, lines: LyricLine[], at: number, size: LyricsProps['size']): LyricsProps => ({
+const lyricsProps = (
+  one: Track,
+  lines: LyricLine[],
+  at: number,
+  size: LyricsProps['size'],
+  colors: Colors,
+): LyricsProps => ({
   lines,
   position: positionAt(one, at),
   isPlaying: one.isPlaying,
   title: trackText(one),
   size,
+  accents: colors.accents,
   stamp: (lyricsStamps += 1),
 })
+
+// The picker's strips for the person's own color.
+const pickerProps = (color: string): PickerProps => ({ hues: hueStrip(), shades: shadeStrip(color) })
+
+// Takes the color a picker click names, a color of the strips it was given:
+// checked here, since what a client posts is input, not a fact. Answers the
+// new color, or undefined for a click that names none.
+const pickColor = async ($: EngineInterface, data: unknown): Promise<string | undefined> => {
+  const { strip, index } = (data ?? {}) as Partial<PickerClick>
+  const chosen = await read($, settings)
+  const strips = { hue: hueStrip(), shade: shadeStrip(chosen.color) }
+  const color = (strip === 'hue' || strip === 'shade') && Number.isInteger(index) ? strips[strip][index ?? -1] : undefined
+  if (color !== undefined) await choose($, { palette: 'custom', color })
+  return color
+}
 
 // Lists the reported apps for the panel, leaving the list alone while it stays the same.
 const listSources = async ($: EngineInterface, all: readonly Session[]): Promise<void> => {
@@ -481,6 +538,7 @@ const HELP = [
   '/player buttons off|on            — кнопки над полем ввода',
   '/player time off|on               — время трека',
   '/player lyrics off|on             — текст песни вместо названия',
+  '/player color claude|neon|sunset|rgb|mono|#цвет — цвет эквалайзера и слова',
   '/player prev|pause|play|next      — управлять музыкой',
   '/player off | on                  — выключить или включить всё',
   '/player debug                     — что происходит внутри (для поиска багов)',
@@ -495,6 +553,7 @@ const summary = (chosen: PlayerSettings): string =>
     `Кнопки: ${SWITCH_LABELS[chosen.controls]}`,
     `Время: ${SWITCH_LABELS[chosen.time]}`,
     `Текст: ${SWITCH_LABELS[chosen.lyrics]}`,
+    `Цвет: ${PALETTE_LABELS[chosen.palette]}${chosen.palette === 'custom' ? ` ${chosen.color}` : ''}`,
   ].join(' · ')
 
 // Readable names for the app ids Windows reports, first match wins.
@@ -662,6 +721,15 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
     await choose($, { time: value })
     return `Время трека: ${SWITCH_LABELS[value]}.`
   }
+  if (what === 'color' && value !== undefined) {
+    const color = parseHex(value)
+    const palette = color === undefined ? lookup(PALETTE_WORDS, value) : 'custom'
+    if (palette !== undefined) {
+      await choose($, { palette, ...(color === undefined ? {} : { color }) })
+      const chosen = await read($, settings)
+      return palette === 'custom' ? `Свой цвет: ${chosen.color}.` : `Цвет: ${PALETTE_LABELS[palette]}.`
+    }
+  }
   if (what === 'lyrics' && isOneOf(SWITCHES, value)) {
     await choose($, { lyrics: value })
     return value === 'on' ? `Текст песни: вкл. ${LYRICS_NOTE}` : 'Текст песни: выкл.'
@@ -696,7 +764,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'player',
       description: 'Плеер: что играет и где его показывать',
-      argumentHint: '[next|pause|play|prev|top|size|bottom|buttons|time|lyrics|off|on|debug|bug]',
+      argumentHint: '[next|pause|play|prev|top|size|bottom|buttons|time|lyrics|color|off|on|debug|bug]',
     })
 
     // Animates the equalizer only while something plays and is on screen.
@@ -742,7 +810,9 @@ export const register: Register = on => {
       read($, error),
       read($, sources),
     ])
-    const { Box, Button, Link, Text } = $.ui.resolve(e)
+    const table = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = table
+    const Client = LIVE_SURFACES.includes(e.surface) && 'Client' in table ? table.Client : undefined
     // The apps playing now, and the hidden ones so they can come back.
     const apps = [...new Set([...listed.map(one => one.app), ...chosen.hidden])]
 
@@ -797,6 +867,37 @@ export const register: Register = on => {
             {LYRICS_NOTE}
           </Text>
         </Box>
+        <Box flexDirection="column">
+          <Text dimColor>Цвет эквалайзера и слова, которое поют</Text>
+          <Box flexDirection="row" gap="xs" flexWrap="wrap">
+            {PALETTES.map(palette => (
+              <Button
+                key={`palette-${palette}`}
+                label={PALETTE_LABELS[palette]}
+                variant={palette === chosen.palette ? 'primary' : 'secondary'}
+                onPress={() => void choose($, { palette })}
+              >
+                {`${PALETTE_LABELS[palette]} `}
+                {[...EQUALIZER[0] ?? ''].map((glyph, index) => {
+                  const color = paletteSample(palette, chosen.color)[index]
+                  return color === undefined ? <Text>{glyph}</Text> : <Text color={color}>{glyph}</Text>
+                })}
+              </Button>
+            ))}
+          </Box>
+          {chosen.palette !== 'custom' ? null : (
+            <Box flexDirection="row" gap="sm" alignItems="center">
+              {Client === undefined ? null : (
+                <Client key="picker" module="./picker.tsx" width={PICKER_HUES} props={pickerProps(chosen.color)} />
+              )}
+              <Text dimColor size="caption">
+                {Client === undefined
+                  ? `Свой цвет ${chosen.color}. Другой: /player color #rrggbb`
+                  : `Кликни цвет сверху, яркость снизу. Сейчас ${chosen.color}, или /player color #rrggbb`}
+              </Text>
+            </Box>
+          )}
+        </Box>
         {apps.length === 0 ? null : (
           <Box flexDirection="column">
             <Text dimColor>Источники: выделенные показываются, нажми, чтобы скрыть или вернуть</Text>
@@ -823,17 +924,22 @@ export const register: Register = on => {
     )
   })
 
-  // The band's clock and lyrics ask for the time; the answer is their next props.
+  // The band's clock, equalizer and lyrics ask for what changes by the
+  // moment; the answer is their next props. The panel's picker posts a click.
   on('ui.message', async ($, e, next) => {
+    if (e.element === 'picker') {
+      const picked = await pickColor($, e.data)
+      return picked === undefined ? next(e) : { props: pickerProps(picked) }
+    }
     if (e.element !== 'clock' && e.element !== 'lyrics' && e.element !== 'equalizer') return next(e)
     const [chosen, playing, sung] = await Promise.all([read($, settings), read($, track), read($, lyrics)])
     if (playing === null) return next(e)
-    const [at, size] = [await $.clock.now(), TEXT_SIZE[chosen.size]]
+    const [at, size, colors] = [await $.clock.now(), TEXT_SIZE[chosen.size], colorsOf(chosen)]
 
-    if (e.element === 'equalizer') return { props: equalizerProps(playing, at, size) }
+    if (e.element === 'equalizer') return { props: equalizerProps(playing, at, size, colors) }
     if (e.element === 'lyrics') {
       const lines = linesFor(chosen, playing, sung)
-      return lines === undefined ? next(e) : { props: lyricsProps(playing, lines, at, size) }
+      return lines === undefined ? next(e) : { props: lyricsProps(playing, lines, at, size, colors) }
     }
     seen.clockAsks += 1
     const time = timeText(playing, at)
@@ -867,6 +973,7 @@ export const register: Register = on => {
       const { Box, Button, Text } = table
       const Client = isLive && 'Client' in table ? table.Client : undefined
       const size = TEXT_SIZE[chosen.size]
+      const colors = colorsOf(chosen)
       const time = chosen.time === 'on' ? timeText(playing, at) : undefined
       const lines = linesFor(chosen, playing, sung)
       const controls =
@@ -891,10 +998,15 @@ export const register: Register = on => {
           {isControlsLast ? null : controls}
           {Client === undefined ? (
             <Text size={size} dimColor={!playing.isPlaying} mono>
-              {equalizer(playing, at)}
+              {playing.isPlaying && colors.bars.length > 0
+                ? [...equalizer(playing, at)].map((glyph, index) => {
+                    const color = barColor(colors.bars, index, Math.floor(at / FRAME_MS))
+                    return color === undefined ? <Text>{glyph}</Text> : <Text color={color}>{glyph}</Text>
+                  })
+                : equalizer(playing, at)}
             </Text>
           ) : (
-            <Client key="equalizer" module="./equalizer.tsx" props={equalizerProps(playing, at, size)} />
+            <Client key="equalizer" module="./equalizer.tsx" props={equalizerProps(playing, at, size, colors)} />
           )}
           {lines === undefined ? (
             <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
@@ -909,7 +1021,7 @@ export const register: Register = on => {
               key="lyrics"
               module="./lyrics.tsx"
               width={Math.max(LYRICS_MIN, Math.min(LYRICS_MAX, e.props.bodyColumns - BAND_OTHERS))}
-              props={lyricsProps(playing, lines, at, size)}
+              props={lyricsProps(playing, lines, at, size, colors)}
             />
           )}
           {time === undefined ? null : Client === undefined ? (

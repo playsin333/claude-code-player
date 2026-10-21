@@ -10,14 +10,18 @@ export type LyricsProps = {
   // What shows before the first line and in breaks.
   title: string
   size: 'caption' | 'body'
+  // The colors of the word being sung, the next for each word of a line;
+  // none: a new word comes in dim instead.
+  accents: string[]
   // New with every props, so the count starts over from `position`.
   stamp: number
 }
 
 type LyricsState = { stamp: number; ms: number }
 
-// A word in view: its text, trailing space included, and how long it has been in view.
-export type ShownWord = { text: string; age: number }
+// A word in view: its text, trailing space included, how long it has been in
+// view, and whether it is the one being sung.
+export type ShownWord = { text: string; age: number; isCurrent: boolean }
 
 const TICK_MS = 50
 const ASK_MS = 1000
@@ -30,6 +34,8 @@ const SECONDS_PER_CHAR = 0.11
 const LINE_SHARE = 0.85
 // A last line, or one followed by a long pause, stays this long once sung.
 const HOLD_S = 6
+// The last word of a line stays the one being sung this long after its line's singing time.
+const LAST_WORD_S = 0.5
 
 // Reads LRC text: `[mm:ss.xx] words` lines, several stamps on one line allowed,
 // other tags skipped. Sorted by time.
@@ -64,8 +70,10 @@ export const reveal = (lines: readonly LyricLine[], at: number): ShownWord[] | u
     const age = at - (line.at + (singing * before) / length)
     before += text.length
     if (age < 0) break
-    words.push({ text, age })
+    words.push({ text, age, isCurrent: false })
   }
+  const last = words.at(-1)
+  if (last !== undefined && at <= line.at + singing + LAST_WORD_S) last.isCurrent = true
   return words
 }
 
@@ -103,9 +111,14 @@ const Lyrics: ClientModule<LyricsProps, LyricsState> = (props, surface) => {
   // A line longer than the room keeps its newest words in view.
   return (
     <Text size={props.size} dimColor={!props.isPlaying} wrap="truncate-start">
-      {words.map(word => (
-        <Text dimColor={isFresh(word)}>{word.text}</Text>
-      ))}
+      {words.map((word, index) => {
+        const color = word.isCurrent && props.isPlaying ? props.accents[index % props.accents.length] : undefined
+        return color === undefined ? (
+          <Text dimColor={props.accents.length === 0 && isFresh(word)}>{word.text}</Text>
+        ) : (
+          <Text color={color}>{word.text}</Text>
+        )
+      })}
     </Text>
   )
 }

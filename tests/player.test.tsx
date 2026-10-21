@@ -231,7 +231,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.6.0')
+  expect(answer.text).toContain('now-playing 1.7.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -556,25 +556,30 @@ test('with lyrics on, a line comes in word by word as it is sung', async ($, on)
   expect((await $.command.run(run('debug'))).text).toContain('Текст песни: найден, строк: 3')
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // Each word in view: · when it is dim, * when it is in the palette's color.
   const words = async (): Promise<string[]> =>
-    (await ui.findAll({ type: 'Text', in: 'lyrics' })).slice(1).map(word => `${word.text.trim()}${word.props.dimColor ? '·' : ''}`)
+    (await ui.findAll({ type: 'Text', in: 'lyrics' }))
+      .slice(1)
+      .map(word => `${word.text.trim()}${word.props.dimColor ? '·' : ''}${word.props.color ? '*' : ''}`)
   // Before the first line, the title.
   expect((await ui.find({ type: 'Text', in: 'lyrics' }))?.text).toBe('Lil Peep — Gym Class')
 
+  // The word being sung is in the palette's color, Claude's by default.
   await both(clock, ui, 2_000)
-  expect(await words()).toEqual(['раз·'])
+  expect(await words()).toEqual(['раз*'])
+  expect((await ui.findAll({ type: 'Text', in: 'lyrics' }))[1]?.props.color).toBe('#d97757')
   // A line longer than its room keeps the newest words in view.
   expect((await ui.find({ type: 'Text', in: 'lyrics' }))?.props.wrap).toBe('truncate-start')
   await both(clock, ui, 500)
-  expect(await words()).toEqual(['раз', 'два·'])
+  expect(await words()).toEqual(['раз', 'два*'])
   await both(clock, ui, 500)
-  expect(await words()).toEqual(['раз', 'два', 'три·'])
+  expect(await words()).toEqual(['раз', 'два', 'три*'])
 
   // The break between lines shows the title again, then the next line comes in.
   await both(clock, ui, 1_000)
   expect((await ui.find({ type: 'Text', in: 'lyrics' }))?.text).toBe('Lil Peep — Gym Class')
   await both(clock, ui, 8_000)
-  expect(await words()).toEqual(['четыре·'])
+  expect(await words()).toEqual(['четыре*'])
   await ui.unmount()
 })
 
@@ -734,4 +739,103 @@ test('the equalizer follows the sound while Windows reads its meter, and plays i
   expect(await bars()).toMatch(/^[▂▃▅▆▇]{3}$/)
   expect((await $.command.run(run('debug'))).text).toContain('эквалайзер: свои кадры')
   await ui.unmount()
+})
+
+// The colors the equalizer's bars are drawn in, left to right.
+const barColors = async (ui: { findAll: (query: { type: string; in: string }) => Promise<{ props: Record<string, unknown> }[]> }) =>
+  (await ui.findAll({ type: 'Text', in: 'equalizer' })).slice(1).map(bar => bar.props.color)
+
+test('the equalizer takes the palette, Claude by default, and /player color changes it', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await barColors(ui)).toEqual(['#eb9473', '#d97757', '#bf5f3d'])
+
+  expect((await $.command.run(run('color neon'))).text).toBe('Цвет: Неон.')
+  expect(await barColors(ui)).toEqual(['#ff5fd2', '#a178ff', '#3ddcff'])
+
+  // Any color of one's own: three shades of it.
+  expect((await $.command.run(run('color #5AB'))).text).toBe('Свой цвет: #55aabb.')
+  expect(await barColors(ui)).toEqual(['#81c0cc', '#55aabb', '#3c8897'])
+
+  expect((await $.command.run(run('color mono'))).text).toBe('Цвет: без цвета.')
+  expect(await barColors(ui)).toEqual([])
+  expect((await ui.find({ type: 'Text', in: 'equalizer' }))?.text).toBe('▂▅▃')
+
+  expect((await $.command.run(run('color plaid'))).text).toContain('Не знаю «color plaid»')
+  await ui.unmount()
+})
+
+test('RGB runs the bars around a color wheel', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, GYM_CLASS], clock, { settings: { top: 'center', size: 'small', bottom: 'model', palette: 'rgb' } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await barColors(ui)).toEqual(['#f04c4c', '#baf04c', '#4cf0ba'])
+  await ui.advance(100)
+  expect(await barColors(ui)).toEqual(['#f0674c', '#9ef04c', '#4cf0d5'])
+  await ui.unmount()
+})
+
+test('the panel picks a color of one\'s own from its strips', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, GYM_CLASS], clock)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
+  expect((await panel.find({ key: 'palette-claude' }))?.props.variant).toBe('primary')
+  expect(await panel.find({ key: 'picker' })).toBeUndefined()
+  await panel.press({ key: 'palette-custom' })
+  expect(await panel.find({ key: 'picker' })).toBeDefined()
+
+  // Top strip: every hue; the first cell is red.
+  await panel.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'picker' })
+  expect((await $.command.run(run(''))).text).toContain('Цвет: свой #f04242')
+  // Bottom strip: that red from dark to light; the last cell is the lightest.
+  await panel.pointer({ type: 'down', x: 35, y: 1, button: 'left', in: 'picker' })
+  expect((await $.command.run(run(''))).text).toContain('Цвет: свой #f9b8b8')
+
+  // A post that names no color of the strips changes nothing.
+  await panel.post({ strip: 'hue', index: 999 }, { in: 'picker' })
+  await panel.post({ strip: 'paint', index: 1 }, { in: 'picker' })
+  expect((await $.command.run(run(''))).text).toContain('Цвет: свой #f9b8b8')
+  await panel.unmount()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await barColors(band))[1]).toBe('#f9b8b8')
+  await band.unmount()
+})
+
+test('a surface without the picker says how to set a color in words', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, GYM_CLASS], clock, { settings: { top: 'center', size: 'small', bottom: 'model', palette: 'custom', color: '#5ab0ff' } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'vscode' })
+  expect(await panel.find({ key: 'picker' })).toBeUndefined()
+  expect((await panel.find({ type: 'Text', text: /\/player color #rrggbb/ }))?.text).toContain('#5ab0ff')
+  await panel.unmount()
+})
+
+test('the panel with its palettes and picker draws in the terminal too', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, GYM_CLASS], clock, { settings: { top: 'center', size: 'small', bottom: 'model', palette: 'custom', color: '#5ab0ff' } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'terminal' })
+  expect((await panel.find({ key: 'palette-custom' }))?.props.variant).toBe('primary')
+  expect(await panel.find({ key: 'picker' })).toBeDefined()
+  await panel.unmount()
+
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await barColors(band)).toEqual(['#97cdff', '#5ab0ff', '#1d93ff'])
+  await band.unmount()
 })

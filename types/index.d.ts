@@ -42,6 +42,10 @@ export type BottomPlace = 'off' | 'model'
 // The playback buttons and the track time.
 export type Switch = 'off' | 'on'
 
+// The colors of the equalizer and of the word being sung: none, a fixed set,
+// a running rainbow, or shades of the person's own `color`.
+export type Palette = 'mono' | 'claude' | 'neon' | 'sunset' | 'rgb' | 'custom'
+
 export type PlayerSettings = {
   top: TopPlace
   size: TextSize
@@ -51,6 +55,9 @@ export type PlayerSettings = {
   // Synced lyrics from lrclib.net in place of the title; off until asked for,
   // since the search sends the artist and title there.
   lyrics: Switch
+  palette: Palette
+  // The `custom` palette's color, #rrggbb.
+  color: string
   // Apps whose sessions the player ignores, by the id Windows gives them.
   hidden: string[]
 }
