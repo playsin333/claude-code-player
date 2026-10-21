@@ -1,24 +1,27 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BottomPlace, PlayerSettings, Switch, TextSize, TopPlace, Track } from '../types'
+import type { BottomPlace, PlayerSettings, Session, Switch, TextSize, TopPlace, Track } from '../types'
 
-const DEFAULTS: PlayerSettings = { top: 'center', size: 'small', bottom: 'model', controls: 'on', time: 'on' }
+const DEFAULTS: PlayerSettings = { top: 'center', size: 'small', bottom: 'model', controls: 'on', time: 'on', hidden: [] }
 
+const sessions = atom({ plugin: 'now-playing', key: 'sessions' } as const, [])
 const track = atom({ plugin: 'now-playing', key: 'track' } as const, null)
 const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAULTS)
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.2.0'
+const VERSION = '1.3.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
 const SWITCHES: readonly Switch[] = ['off', 'on']
-const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▄▆▃', '▆▃▄']
+// No ▄: Windows draws it from another font than the rest, a frame of another width.
+const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▃▆▂', '▆▂▃']
 const EQUALIZER_PAUSED = '▁▁▁'
 const FRAME_MS = 300
 const LINE_MAX = 60
+const SOURCE_MAX = 32
 const RESTART_MS = 3000
 const MAX_FAILED_STARTS = 5
 const STDERR_KEPT = 300
@@ -61,7 +64,7 @@ const lookup = <T,>(table: Record<string, T>, word: string | undefined): T | und
 const JUNK =
   /\s*[([](?:official\s+)?(?:music\s+|lyric\s+)?(?:video|audio|visuali[sz]er|lyrics?)(?:\s+video)?[)\]]|\s*[([](?:hd|hq|4k|official|клип|премьера клипа|премьера)[)\]]/gi
 
-export const cleanTrack = (raw: Track): Track => {
+export const cleanTrack = <T extends Track>(raw: T): T => {
   let artist = raw.artist.trim()
   let title = raw.title.replace(JUNK, '').trim()
 
@@ -122,6 +125,7 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
       bottom: lookup(BOTTOM_WORDS, String(saved.bottom)) ?? DEFAULTS.bottom,
       controls: isOneOf(SWITCHES, saved.controls) ? saved.controls : DEFAULTS.controls,
       time: isOneOf(SWITCHES, saved.time) ? saved.time : DEFAULTS.time,
+      hidden: Array.isArray(saved.hidden) ? saved.hidden.filter((app): app is string => typeof app === 'string') : [],
     }
   }
   const mode = await $.store.get('mode')
@@ -138,20 +142,43 @@ const refreshStatus = async ($: EngineInterface): Promise<void> => {
   $.ui.status(chosen.bottom === 'model' && playing !== null ? lineText(playing, at, chosen.time === 'on') : undefined)
 }
 
+// Which session to show. One that plays: the one shown last, then the one
+// Windows calls current, then any. With none playing, the one shown last
+// stays, so play resumes what was playing. Hidden apps are never picked.
+export const pick = (all: readonly Session[], hidden: readonly string[], lastApp: string | undefined): Session | undefined => {
+  const visible = all.filter(one => !hidden.includes(one.app))
+  const last = visible.find(one => one.app === lastApp)
+  const current = visible.find(one => one.isCurrent)
+  return [last, current, ...visible].find(one => one?.isPlaying === true) ?? last ?? current ?? visible[0]
+}
+
+// Shows the session `pick` chooses from the ones last reported.
+const select = async ($: EngineInterface): Promise<void> => {
+  const [all, chosen, shown] = await Promise.all([read($, sessions), read($, settings), read($, track)])
+  const next = pick(all, chosen.hidden, shown?.app) ?? null
+  await update($, track, () => next)
+  await refreshStatus($)
+}
+
 const choose = async ($: EngineInterface, change: Partial<PlayerSettings>): Promise<PlayerSettings> => {
   const chosen = await update($, settings, current => ({ ...current, ...change }))
   await $.store.set('settings', chosen)
-  await refreshStatus($)
+  await select($)
   return chosen
+}
+
+const toggleSource = async ($: EngineInterface, app: string): Promise<void> => {
+  const { hidden } = await read($, settings)
+  await choose($, { hidden: hidden.includes(app) ? hidden.filter(one => one !== app) : [...hidden, app] })
 }
 
 // The running helper's command file, from its first line; null while none runs.
 let commandFile: string | null = null
 
-// What the helper prints: its command file, a track, a press's outcome, or a failure.
-type HelperLine = { commands?: string; track?: Track | null; command?: string; ok?: boolean; error?: string }
+// What the helper prints: its command file, the sessions, a press's outcome, or a failure.
+type HelperLine = { commands?: string; sessions?: Session[]; command?: string; app?: string; ok?: boolean; error?: string }
 
-// Feeds the helper's JSON lines into `track` for the session's life,
+// Feeds the helper's JSON lines into `sessions` for the session's life,
 // restarting it if it dies and giving up if it keeps failing to start.
 const watch = async ($: EngineInterface): Promise<void> => {
   const script = `${$.plugin.root}\\helper\\now-playing.ps1`
@@ -188,18 +215,21 @@ const watch = async ($: EngineInterface): Promise<void> => {
             continue
           }
           if (message.command !== undefined) {
-            seen.lastAnswer = `${message.command}: ${message.ok === true ? 'приложение выполнило' : 'приложение отказалось'}`
+            const outcome = message.ok === true ? 'выполнило' : 'отказалось'
+            seen.lastAnswer = `${message.command} в ${message.app ?? '—'}: приложение ${outcome}`
             continue
           }
+          if (message.sessions === undefined) continue
           const receivedAt = await $.clock.now()
           // A position with no report time counts from now.
-          const next = message.track
-            ? { ...cleanTrack(message.track), updatedAt: (message.track.updatedAt ?? 0) > 0 ? message.track.updatedAt : receivedAt }
-            : null
+          const reported = message.sessions.map(one => ({
+            ...cleanTrack(one),
+            updatedAt: (one.updatedAt ?? 0) > 0 ? one.updatedAt : receivedAt,
+          }))
           await update($, error, () => null)
           await update($, now, () => receivedAt)
-          await update($, track, () => next)
-          await refreshStatus($)
+          await update($, sessions, () => reported)
+          await select($)
         }
       }
     } catch (thrown) {
@@ -212,8 +242,8 @@ const watch = async ($: EngineInterface): Promise<void> => {
       const detail = stderr.trim() === '' ? '' : ` (${stderr.trim()})`
       await update($, error, () => `помощник не запустился или сразу закрылся${detail}. Пока плеер работает только на Windows.`)
     }
-    await update($, track, () => null)
-    await refreshStatus($)
+    await update($, sessions, () => [])
+    await select($)
     await $.clock.sleep(RESTART_MS)
   }
 }
@@ -306,7 +336,7 @@ const press = async ($: EngineInterface, command: Command): Promise<string> => {
   if (playing === null) return 'Сейчас ничего не играет.'
 
   try {
-    await $.fs.write(commandFile, command)
+    await $.fs.write(commandFile, JSON.stringify({ command, app: playing.app, title: playing.title }))
     seen.lastCommand = command
     return command === 'toggle' ? (playing.isPlaying ? COMMAND_ANSWERS.pause : COMMAND_ANSWERS.play) : COMMAND_ANSWERS[command]
   } catch (thrown) {
@@ -392,9 +422,23 @@ export const register: Register = on => {
     const words = e.args.trim().toLowerCase().split(/\s+/).filter(word => word !== '')
 
     if (words[0] === 'debug') {
-      const [chosen, playing, failure] = await Promise.all([read($, settings), read($, track), read($, error)])
+      const [chosen, playing, failure, all] = await Promise.all([
+        read($, settings),
+        read($, track),
+        read($, error),
+        read($, sessions),
+      ])
       const surfaces = await $.session.surfaces()
       const at = await $.clock.now()
+      const listed = all.map(one => {
+        const marks = [
+          one.isPlaying ? 'играет' : 'пауза',
+          ...(one.isCurrent ? ['текущая в Windows'] : []),
+          ...(chosen.hidden.includes(one.app) ? ['скрыта'] : []),
+          ...(one.app === playing?.app && one.title === playing.title ? ['показана'] : []),
+        ]
+        return `  ${appName(one.app)} (${one.app}), ${marks.join(', ')}: ${trackText(one)}`
+      })
       const timeline =
         playing === null
           ? '—'
@@ -407,6 +451,10 @@ export const register: Register = on => {
           summary(chosen),
           nowText(playing, failure),
           `Источник как его называет Windows: ${playing?.app ?? '—'}`,
+          `Скрытые источники: ${chosen.hidden.length === 0 ? 'нет' : chosen.hidden.join(', ')}`,
+          '',
+          `Медиасессии Windows: ${all.length === 0 ? 'нет' : ''}`,
+          ...listed,
           '',
           'Полоса над полем ввода:',
           `  приложение просило нарисовать: ${seen.bandCalls} раз`,
@@ -441,8 +489,15 @@ export const register: Register = on => {
   on('ui.render', { component: 'CommandOutput', props: { command: 'player' } }, async ($, e, next) => {
     if (e.props.args.trim() !== '' || e.props.isErrored) return next(e)
 
-    const [chosen, playing, failure] = await Promise.all([read($, settings), read($, track), read($, error)])
+    const [chosen, playing, failure, all] = await Promise.all([
+      read($, settings),
+      read($, track),
+      read($, error),
+      read($, sessions),
+    ])
     const { Box, Button, Text } = $.ui.resolve(e)
+    // The apps playing now, and the hidden ones so they can come back.
+    const apps = [...new Set([...all.map(one => one.app), ...chosen.hidden])]
 
     const row = <T extends string>(
       title: string,
@@ -489,6 +544,24 @@ export const register: Register = on => {
         {row('Внизу', 'bottom', BOTTOM_PLACES, BOTTOM_LABELS, chosen.bottom)}
         {row('Кнопки', 'controls', SWITCHES, SWITCH_LABELS, chosen.controls)}
         {row('Время трека', 'time', SWITCHES, SWITCH_LABELS, chosen.time)}
+        {apps.length === 0 ? null : (
+          <Box flexDirection="column">
+            <Text dimColor>Источники: выделенные показываются, нажми, чтобы скрыть или вернуть</Text>
+            <Box flexDirection="row" gap="xs" flexWrap="wrap">
+              {apps.map(app => {
+                const one = all.find(session => session.app === app)
+                return (
+                  <Button
+                    key={`source-${app}`}
+                    label={one === undefined ? appName(app) : `${appName(app)}: ${clip(trackText(one), SOURCE_MAX)}`}
+                    variant={chosen.hidden.includes(app) ? 'secondary' : 'primary'}
+                    onPress={() => void toggleSource($, app)}
+                  />
+                )
+              })}
+            </Box>
+          </Box>
+        )}
       </Box>
     )
   })
@@ -509,29 +582,38 @@ export const register: Register = on => {
     try {
       const { Box, Button, Text } = $.ui.resolve(e)
       const time = chosen.time === 'on' ? timeText(playing, at) : undefined
+      const controls =
+        chosen.controls === 'on' ? (
+          <Box key="controls" flexDirection="row" gap="xs">
+            <Button key="previous" label={GLYPHS.previous} plain dimColor onPress={() => void press($, 'previous')} />
+            <Button
+              key="toggle"
+              label={playing.isPlaying ? GLYPHS.pause : GLYPHS.play}
+              plain
+              dimColor
+              onPress={() => void press($, 'toggle')}
+            />
+            <Button key="next" label={GLYPHS.next} plain dimColor onPress={() => void press($, 'next')} />
+          </Box>
+        ) : null
+      // The buttons sit at the edge the band leans to, where a title or time
+      // of another width cannot move them.
+      const isControlsLast = chosen.top === 'right'
       const player = (
         <Box key="player" flexDirection="row" alignItems="center" gap="sm" justifyContent={JUSTIFY[chosen.top]}>
-          {chosen.controls === 'on' ? (
-            <Box key="controls" flexDirection="row" gap="xs">
-              <Button key="previous" label={GLYPHS.previous} plain dimColor onPress={() => void press($, 'previous')} />
-              <Button
-                key="toggle"
-                label={playing.isPlaying ? GLYPHS.pause : GLYPHS.play}
-                plain
-                dimColor
-                onPress={() => void press($, 'toggle')}
-              />
-              <Button key="next" label={GLYPHS.next} plain dimColor onPress={() => void press($, 'next')} />
-            </Box>
-          ) : null}
+          {isControlsLast ? null : controls}
+          <Text size={TEXT_SIZE[chosen.size]} dimColor={!playing.isPlaying} mono>
+            {equalizer(playing, at)}
+          </Text>
           <Text size={TEXT_SIZE[chosen.size]} dimColor={!playing.isPlaying} wrap="truncate-end">
-            {`${equalizer(playing, at)}  ${trackText(playing)}`}
+            {trackText(playing)}
           </Text>
           {time === undefined ? null : (
             <Text size={TEXT_SIZE[chosen.size]} dimColor tabular>
               {time}
             </Text>
           )}
+          {isControlsLast ? controls : null}
         </Box>
       )
       seen.bandDrawn += 1

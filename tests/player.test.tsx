@@ -28,7 +28,13 @@ const run = (args: string) => ({
   presentation: { isFullscreen: false, columns: 80 },
 })
 
-const line = (track: object | null): string => `${JSON.stringify({ track })}\r\n`
+// The helper's report of these sessions, the first one current in Windows.
+const report = (...sessions: object[]): string =>
+  `${JSON.stringify({ sessions: sessions.map((one, at) => ({ isCurrent: at === 0, ...one })) })}\r\n`
+
+const line = (track: object): string => report(track)
+
+const EQUALIZER = { type: 'Text', text: /^[▁▂▃▅▆▇]{3}$/ } as const
 
 const GYM_CLASS = line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })
 
@@ -42,10 +48,11 @@ const timed = (at: number, isPlaying = true): string =>
   line({ app: 'Spotify.exe', artist: 'Lil Peep', title: 'Gym Class', isPlaying, position: 60, duration: 225, updatedAt: at })
 
 // Stands for the engine beneath the plugin: a helper that prints `lines`,
-// then stays alive until the clock passes a minute.
+// waiting where a line is a number of milliseconds, then stays alive until
+// the clock passes a minute.
 const start = async (
   on: On,
-  lines: string[],
+  lines: (string | number)[],
   clock: MockClock,
   stored: Record<string, unknown> = {},
 ): Promise<string[]> => {
@@ -59,7 +66,10 @@ const start = async (
     return { value: undefined }
   })
   on('process.spawn', async function* () {
-    for (const text of lines) yield { stream: 'stdout' as const, text }
+    for (const text of lines) {
+      if (typeof text === 'number') await clock.sleep(text)
+      else yield { stream: 'stdout' as const, text }
+    }
     await clock.sleep(60_000)
     return { value: { code: 0, signal: null } }
   })
@@ -83,8 +93,10 @@ test('the band shows the cleaned track, small and centered by default', async ($
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const text = await ui.find({ type: 'Text', text: /Gym Class/ })
-  expect(text?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  expect(text?.text).toBe('Lil Peep — Gym Class')
   expect(text?.props.size).toBe('caption')
+  expect((await ui.find(EQUALIZER))?.text).toBe('▂▅▃')
+  expect((await ui.find(EQUALIZER))?.props.mono).toBe(true)
   expect((await ui.find({ key: 'player' }))?.props.justifyContent).toBe('center')
   await ui.unmount()
 })
@@ -97,7 +109,7 @@ test('the band keeps what other plugins draw there', async ($, on) => {
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await ui.find({ type: 'Text', text: /engine/ }))?.text).toBe('engine')
-  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
   await ui.unmount()
 })
 
@@ -109,7 +121,8 @@ test('a JSON line split across pieces is still read', async ($, on) => {
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /Положение/ }))?.text).toBe('▁▁▁  Скриптонит — Положение')
+  expect((await ui.find({ type: 'Text', text: /Положение/ }))?.text).toBe('Скриптонит — Положение')
+  expect((await ui.find(EQUALIZER))?.text).toBe('▁▁▁')
   await ui.unmount()
 })
 
@@ -214,7 +227,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.2.0')
+  expect(answer.text).toContain('now-playing 1.3.0')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -319,7 +332,9 @@ test('the buttons and /player words hand presses to the helper', async ($, on) =
 
   expect((await $.command.run(run('prev'))).text).toBe('Предыдущий трек.')
   expect((await $.command.run(run('pause'))).text).toBe('Пауза.')
-  expect(writes.map(write => write.text)).toEqual(['next', 'toggle', 'previous', 'pause'])
+  const presses = writes.map(write => JSON.parse(write.text) as { command: string; app: string; title: string })
+  expect(presses.map(one => one.command)).toEqual(['next', 'toggle', 'previous', 'pause'])
+  expect(presses.every(one => one.app === 'Spotify.exe' && one.title === 'Gym Class')).toBe(true)
   expect(writes.every(write => write.path === COMMAND_FILE)).toBe(true)
   expect((await $.command.run(run('debug'))).text).toContain('последняя команда: pause')
 })
@@ -337,7 +352,7 @@ test('/player buttons and time turn them off', async ($, on) => {
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect(await ui.find({ key: 'next' })).toBeUndefined()
   expect(await ui.find(TIME)).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
   await ui.unmount()
 
   const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
@@ -354,8 +369,96 @@ test('the band draws its buttons and time in the terminal too', async ($, on) =>
   await clock.settle()
 
   const ui = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
+  expect((await ui.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('Lil Peep — Gym Class')
   expect((await ui.find(TIME))?.text).toBe('1:00 / 3:45')
   expect((await ui.find({ key: 'next' }))?.props.plain).toBe(true)
   await ui.unmount()
+})
+
+const MUSIC = { app: 'Chrome._crx_music', artist: 'Lil Peep', title: 'dying out west', duration: 152 }
+const SERIES = { app: 'Chrome', artist: '', title: 'Серия 3', duration: 2700 }
+
+test('with the music paused, play goes back to it and not to a paused series', async ($, on) => {
+  const clock = mock.clock(on)
+  const series = { ...SERIES, isPlaying: false, isCurrent: true }
+  await start(
+    on,
+    [COMMANDS, report(series, { ...MUSIC, isPlaying: true }), 1_000, report(series, { ...MUSIC, isPlaying: false })],
+    clock,
+  )
+  const writes: string[] = []
+  on('fs.write', (_$, e) => {
+    writes.push(e.text)
+    return { value: undefined }
+  })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  await clock.advance(1_000)
+
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await band.find({ type: 'Text', text: /Lil Peep/ }))?.text).toBe('Lil Peep — dying out west')
+  expect((await band.find({ key: 'toggle' }))?.props.label).toBe('▶\uFE0E')
+  await band.press({ key: 'toggle' })
+  await band.unmount()
+
+  expect(JSON.parse(writes.at(-1) ?? '{}')).toEqual({ command: 'toggle', app: MUSIC.app, title: MUSIC.title })
+  expect((await $.command.run(run('debug'))).text).toContain('приложение Chrome (Chrome._crx_music), пауза, показана')
+})
+
+test('a hidden source is never shown, and comes back from the panel', async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses = await start(
+    on,
+    [COMMANDS, report({ ...SERIES, isPlaying: true }, { ...MUSIC, isPlaying: false })],
+    clock,
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect(statuses.at(-1)).toContain('Серия 3')
+
+  const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
+  expect((await panel.find({ key: 'source-Chrome' }))?.props.label).toBe('Chrome: Серия 3')
+  await panel.press({ key: 'source-Chrome' })
+  expect((await panel.find({ key: 'source-Chrome' }))?.props.variant).toBe('secondary')
+  expect(statuses.at(-1)).toContain('Lil Peep — dying out west')
+  expect((await $.command.run(run('debug'))).text).toContain('Скрытые источники: Chrome')
+
+  await panel.press({ key: 'source-Chrome' })
+  expect((await panel.find({ key: 'source-Chrome' }))?.props.variant).toBe('primary')
+  expect(statuses.at(-1)).toContain('Серия 3')
+  await panel.unmount()
+})
+
+test('hidden sources are remembered', async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses = await start(
+    on,
+    [COMMANDS, report({ ...SERIES, isPlaying: true }, { ...MUSIC, isPlaying: true })],
+    clock,
+    { settings: { top: 'center', size: 'small', bottom: 'model', hidden: ['Chrome'] } },
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  expect(statuses.at(-1)).toContain('Lil Peep — dying out west')
+  expect((await $.command.run(run(''))).text).toContain('Кнопки: вкл · Время: вкл')
+})
+
+test('on the right the buttons sit at the edge, after the time', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(on, [COMMANDS, timed(0)], clock, { settings: { top: 'right', size: 'small', bottom: 'model' } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const player = await ui.find({ key: 'player' })
+  expect((player?.children.at(-1) as { props?: { key?: string } } | undefined)?.props?.key).toBe('controls')
+  await ui.unmount()
+
+  await $.command.run(run('top left'))
+  const left = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(((await left.find({ key: 'player' }))?.children[0] as { props?: { key?: string } } | undefined)?.props?.key).toBe(
+    'controls',
+  )
+  await left.unmount()
 })
