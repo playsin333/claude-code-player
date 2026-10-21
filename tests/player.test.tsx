@@ -54,9 +54,10 @@ const start = async (
     await clock.sleep(60_000)
     return { value: { code: 0, signal: null } }
   })
-  // The engine's own drawing, a stand-in beneath the plugin.
+  // The engine's own drawings: a hint line from its text, anything else a stand-in.
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
+    if (e.component === 'PromptHint') return <Text>{e.props.hint}</Text>
     return <Text>engine</Text>
   })
   return statuses
@@ -205,7 +206,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.1.3')
+  expect(answer.text).toContain('now-playing 1.1.4')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
@@ -244,7 +245,6 @@ test('/player test hint draws the track in the hint line until turned off', asyn
   expect((await $.command.run(run('test hint'))).text).toContain('Опыт включён')
   const during = await $.ui.mount({ ...HINT, surface: 'desktop' })
   expect((await during.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
-  expect((await during.find({ type: 'Text', text: /engine/ }))?.text).toBe('engine')
   await during.unmount()
 
   expect((await $.command.run(run('debug'))).text).toContain('что там пишет приложение: ? for shortcuts')

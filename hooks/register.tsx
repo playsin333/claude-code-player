@@ -12,7 +12,7 @@ const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 // Session-only trial of drawing the track in the hint line (/player test hint).
 const hintTrial = atom({ plugin: 'now-playing', key: 'hintTrial' } as const, false)
 
-const VERSION = '1.1.3'
+const VERSION = '1.1.4'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -385,16 +385,9 @@ export const register: Register = on => {
 
     if (!isTrying || playing === null) return next(e)
 
-    const line = await next(e)
-    const { Box, Text } = $.ui.resolve(e)
+    // The desktop draws this line from `hint` alone, so the track replaces it.
     seen.hintDrawn += 1
-
-    return (
-      <Box flexDirection="row" gap="sm">
-        {line}
-        <Text dimColor>{lineText(playing, at)}</Text>
-      </Box>
-    )
+    return next({ ...e, props: { ...e.props, hint: lineText(playing, at) } })
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

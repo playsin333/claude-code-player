@@ -6,7 +6,7 @@
 
 Трек из любого приложения: Spotify, Яндекс Музыка, ВК, SoundCloud, Telegram, скачанная музыка.
 
-![version](https://img.shields.io/badge/version-1.1.3-d97757)
+![version](https://img.shields.io/badge/version-1.1.4-d97757)
 ![platform](https://img.shields.io/badge/platform-Windows-3d3c38)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-3d3c38)
 ![license](https://img.shields.io/badge/license-MIT-3d3c38)
