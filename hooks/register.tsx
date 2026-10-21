@@ -1,19 +1,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { BottomPlace, PlayerSettings, TextSize, TopPlace, Track } from '../types'
+import type { BottomPlace, PlayerSettings, Switch, TextSize, TopPlace, Track } from '../types'
 
-const DEFAULTS: PlayerSettings = { top: 'center', size: 'small', bottom: 'model' }
+const DEFAULTS: PlayerSettings = { top: 'center', size: 'small', bottom: 'model', controls: 'on', time: 'on' }
 
 const track = atom({ plugin: 'now-playing', key: 'track' } as const, null)
 const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAULTS)
-const frame = atom({ plugin: 'now-playing', key: 'frame' } as const, 0)
+const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.1.5'
+const VERSION = '1.2.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
+const SWITCHES: readonly Switch[] = ['off', 'on']
 const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▄▆▃', '▆▃▄']
 const EQUALIZER_PAUSED = '▁▁▁'
 const FRAME_MS = 300
@@ -28,8 +29,33 @@ const TEXT_SIZE = { small: 'caption', normal: 'body' } as const
 const TOP_LABELS: Record<TopPlace, string> = { off: 'выкл', left: 'слева', center: 'по центру', right: 'справа' }
 const SIZE_LABELS: Record<TextSize, string> = { small: 'маленький', normal: 'обычный' }
 const BOTTOM_LABELS: Record<BottomPlace, string> = { off: 'выкл', model: 'вкл' }
+const SWITCH_LABELS: Record<Switch, string> = { off: 'выкл', on: 'вкл' }
 // What `/player bottom` accepts; 1.1.0's `auto` now means the line beside the model.
 const BOTTOM_WORDS: Record<string, BottomPlace> = { off: 'off', on: 'model', model: 'model', auto: 'model' }
+
+// What the helper presses, and the /player words for it.
+type Command = 'previous' | 'toggle' | 'play' | 'pause' | 'next'
+const COMMAND_WORDS: Record<string, Command> = {
+  prev: 'previous',
+  previous: 'previous',
+  back: 'previous',
+  pause: 'pause',
+  play: 'play',
+  next: 'next',
+}
+const COMMAND_ANSWERS: Record<Command, string> = {
+  previous: 'Предыдущий трек.',
+  toggle: 'Готово.',
+  play: 'Играет.',
+  pause: 'Пауза.',
+  next: 'Следующий трек.',
+}
+// Text presentation selectors keep the glyphs out of the emoji font.
+const GLYPHS = { previous: '⏮\uFE0E', pause: '⏸\uFE0E', play: '▶\uFE0E', next: '⏭\uFE0E' } as const
+
+// A word's entry in a table, never one of Object's own names.
+const lookup = <T,>(table: Record<string, T>, word: string | undefined): T | undefined =>
+  word !== undefined && Object.hasOwn(table, word) ? table[word] : undefined
 
 // Tags that streaming sites and browsers append to titles.
 const JUNK =
@@ -56,12 +82,32 @@ export const trackText = (one: Track): string =>
   one.artist === '' ? one.title : `${one.artist} — ${one.title}`
 
 const equalizer = (one: Track, at: number): string =>
-  one.isPlaying ? (EQUALIZER[at % EQUALIZER.length] ?? EQUALIZER_PAUSED) : EQUALIZER_PAUSED
+  one.isPlaying ? (EQUALIZER[Math.floor(at / FRAME_MS) % EQUALIZER.length] ?? EQUALIZER_PAUSED) : EQUALIZER_PAUSED
 
 const clip = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
 
-const lineText = (one: Track, at: number): string => `${equalizer(one, at)}  ${clip(trackText(one), LINE_MAX)}`
+const clockText = (seconds: number): string => {
+  const whole = Math.floor(seconds)
+  const [hours, minutes, rest] = [Math.floor(whole / 3600), Math.floor(whole / 60) % 60, whole % 60]
+  const tail = String(rest).padStart(2, '0')
+  return hours > 0 ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
+}
+
+// "1:23 / 3:45" at `at`, counting on from the app's last report while it plays;
+// undefined when the app reports no length.
+export const timeText = (one: Track, at: number): string | undefined => {
+  const duration = one.duration ?? 0
+  if (!(duration >= 1)) return undefined
+  const since = one.isPlaying ? Math.max(0, at - (one.updatedAt ?? at)) / 1000 : 0
+  const position = Math.min(duration, Math.max(0, (one.position ?? 0) + since))
+  return `${clockText(position)} / ${clockText(duration)}`
+}
+
+const lineText = (one: Track, at: number, isTimed: boolean): string => {
+  const time = isTimed ? timeText(one, at) : undefined
+  return `${equalizer(one, at)}  ${clip(trackText(one), LINE_MAX)}${time === undefined ? '' : `  ${time}`}`
+}
 
 const isOneOf = <T extends string>(options: readonly T[], value: unknown): value is T =>
   typeof value === 'string' && (options as readonly string[]).includes(value)
@@ -73,7 +119,9 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
     return {
       top: isOneOf(TOP_PLACES, saved.top) ? saved.top : DEFAULTS.top,
       size: isOneOf(TEXT_SIZES, saved.size) ? saved.size : DEFAULTS.size,
-      bottom: BOTTOM_WORDS[String(saved.bottom)] ?? DEFAULTS.bottom,
+      bottom: lookup(BOTTOM_WORDS, String(saved.bottom)) ?? DEFAULTS.bottom,
+      controls: isOneOf(SWITCHES, saved.controls) ? saved.controls : DEFAULTS.controls,
+      time: isOneOf(SWITCHES, saved.time) ? saved.time : DEFAULTS.time,
     }
   }
   const mode = await $.store.get('mode')
@@ -85,9 +133,9 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
 }
 
 const refreshStatus = async ($: EngineInterface): Promise<void> => {
-  const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, frame)])
+  const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, now)])
 
-  $.ui.status(chosen.bottom === 'model' && playing !== null ? lineText(playing, at) : undefined)
+  $.ui.status(chosen.bottom === 'model' && playing !== null ? lineText(playing, at, chosen.time === 'on') : undefined)
 }
 
 const choose = async ($: EngineInterface, change: Partial<PlayerSettings>): Promise<PlayerSettings> => {
@@ -96,6 +144,12 @@ const choose = async ($: EngineInterface, change: Partial<PlayerSettings>): Prom
   await refreshStatus($)
   return chosen
 }
+
+// The running helper's command file, from its first line; null while none runs.
+let commandFile: string | null = null
+
+// What the helper prints: its command file, a track, a press's outcome, or a failure.
+type HelperLine = { commands?: string; track?: Track | null; command?: string; ok?: boolean; error?: string }
 
 // Feeds the helper's JSON lines into `track` for the session's life,
 // restarting it if it dies and giving up if it keeps failing to start.
@@ -122,15 +176,28 @@ const watch = async ($: EngineInterface): Promise<void> => {
         pending = lines.pop() ?? ''
         for (const line of lines) {
           if (line.trim() === '') continue
-          const message = JSON.parse(line) as { track?: Track | null; error?: string }
+          const message = JSON.parse(line) as HelperLine
           if (message.error !== undefined) {
             stderr = message.error
             continue
           }
           isHeard = true
           failedStarts = 0
-          const next = message.track ? cleanTrack(message.track) : null
+          if (message.commands !== undefined) {
+            commandFile = message.commands
+            continue
+          }
+          if (message.command !== undefined) {
+            seen.lastAnswer = `${message.command}: ${message.ok === true ? 'приложение выполнило' : 'приложение отказалось'}`
+            continue
+          }
+          const receivedAt = await $.clock.now()
+          // A position with no report time counts from now.
+          const next = message.track
+            ? { ...cleanTrack(message.track), updatedAt: (message.track.updatedAt ?? 0) > 0 ? message.track.updatedAt : receivedAt }
+            : null
           await update($, error, () => null)
+          await update($, now, () => receivedAt)
           await update($, track, () => next)
           await refreshStatus($)
         }
@@ -138,6 +205,7 @@ const watch = async ($: EngineInterface): Promise<void> => {
     } catch (thrown) {
       stderr = thrown instanceof Error ? thrown.message : String(thrown)
     }
+    commandFile = null
 
     if (!isHeard) {
       failedStarts += 1
@@ -153,7 +221,8 @@ const watch = async ($: EngineInterface): Promise<void> => {
 const tick = async ($: EngineInterface): Promise<void> => {
   const [chosen, playing] = await Promise.all([read($, settings), read($, track)])
   if ((chosen.top === 'off' && chosen.bottom === 'off') || playing === null || !playing.isPlaying) return
-  await update($, frame, at => (at + 1) % 1_000_000)
+  const at = await $.clock.now()
+  await update($, now, () => at)
   if (chosen.bottom === 'model') await refreshStatus($)
 }
 
@@ -163,12 +232,21 @@ const HELP = [
   '/player top off|left|center|right — полоса над полем ввода',
   '/player size small|normal         — размер её текста',
   '/player bottom off|on             — строчка внизу, у модели',
+  '/player buttons off|on            — кнопки над полем ввода',
+  '/player time off|on               — время трека',
+  '/player prev|pause|play|next      — управлять музыкой',
   '/player off | on                  — выключить или включить всё',
   '/player debug                     — что происходит внутри (для поиска багов)',
 ].join('\n')
 
 const summary = (chosen: PlayerSettings): string =>
-  `Над полем: ${TOP_LABELS[chosen.top]} · Размер: ${SIZE_LABELS[chosen.size]} · Внизу: ${BOTTOM_LABELS[chosen.bottom]}`
+  [
+    `Над полем: ${TOP_LABELS[chosen.top]}`,
+    `Размер: ${SIZE_LABELS[chosen.size]}`,
+    `Внизу: ${BOTTOM_LABELS[chosen.bottom]}`,
+    `Кнопки: ${SWITCH_LABELS[chosen.controls]}`,
+    `Время: ${SWITCH_LABELS[chosen.time]}`,
+  ].join(' · ')
 
 // Readable names for the app ids Windows reports, first match wins.
 const APP_NAMES: readonly [RegExp, string][] = [
@@ -209,6 +287,9 @@ const seen = {
   bandSkipped: '—',
   bandFailure: '—',
   panelDrawn: 0,
+  lastCommand: '—',
+  lastAnswer: '—',
+  controlFailure: '—',
 }
 
 const describe = (element: unknown): string => {
@@ -216,6 +297,22 @@ const describe = (element: unknown): string => {
   if (typeof element !== 'object') return typeof element
   const { type, ref } = element as { type?: unknown; ref?: unknown }
   return type === 'engine' ? `engine (ref ${String(ref)})` : String(type)
+}
+
+// Hands a button press to the helper; answers what happened, in words.
+const press = async ($: EngineInterface, command: Command): Promise<string> => {
+  const [playing, failure] = await Promise.all([read($, track), read($, error)])
+  if (commandFile === null) return failure === null ? 'Плеер ещё запускается, попробуй через секунду.' : `Ошибка: ${failure}`
+  if (playing === null) return 'Сейчас ничего не играет.'
+
+  try {
+    await $.fs.write(commandFile, command)
+    seen.lastCommand = command
+    return command === 'toggle' ? (playing.isPlaying ? COMMAND_ANSWERS.pause : COMMAND_ANSWERS.play) : COMMAND_ANSWERS[command]
+  } catch (thrown) {
+    seen.controlFailure = thrown instanceof Error ? thrown.message : String(thrown)
+    return `Не получилось передать команду: ${seen.controlFailure}`
+  }
 }
 
 // Applies `/player <args>`; answers what changed, or null when it means nothing.
@@ -231,12 +328,23 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
     await choose($, { size: value })
     return `Размер текста: ${SIZE_LABELS[value]}.`
   }
-  const bottom = value === undefined ? undefined : BOTTOM_WORDS[value]
+  const bottom = lookup(BOTTOM_WORDS, value)
   if (what === 'bottom' && bottom !== undefined) {
     await choose($, { bottom })
     return `Строчка внизу: ${BOTTOM_LABELS[bottom]}.`
   }
+  if ((what === 'buttons' || what === 'controls') && isOneOf(SWITCHES, value)) {
+    await choose($, { controls: value })
+    return `Кнопки: ${SWITCH_LABELS[value]}.`
+  }
+  if (what === 'time' && isOneOf(SWITCHES, value)) {
+    await choose($, { time: value })
+    return `Время трека: ${SWITCH_LABELS[value]}.`
+  }
   if (value !== undefined) return null
+
+  const command = lookup(COMMAND_WORDS, what)
+  if (command !== undefined) return press($, command)
 
   // Whole-player switches, plus the 1.0 commands so old habits keep working.
   const top = current.top === 'off' ? DEFAULTS.top : current.top
@@ -247,7 +355,7 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
     bar: { top, bottom: 'off' },
     line: { top: 'off', bottom: 'model' },
   }
-  const change = what === undefined ? undefined : switches[what]
+  const change = lookup(switches, what)
   if (change === undefined) return null
   const chosen = await choose($, change)
   return what === 'off' ? 'Плеер выключен. Включить обратно: /player on' : summary(chosen)
@@ -263,7 +371,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'player',
       description: 'Плеер: что играет и где его показывать',
-      argumentHint: '[top|size|bottom|off|on|debug]',
+      argumentHint: '[next|pause|play|prev|top|size|bottom|buttons|time|off|on|debug]',
     })
 
     // Animates the equalizer only while something plays and is on screen.
@@ -286,6 +394,12 @@ export const register: Register = on => {
     if (words[0] === 'debug') {
       const [chosen, playing, failure] = await Promise.all([read($, settings), read($, track), read($, error)])
       const surfaces = await $.session.surfaces()
+      const at = await $.clock.now()
+      const timeline =
+        playing === null
+          ? '—'
+          : `позиция ${playing.position ?? '—'} с, длина ${playing.duration ?? '—'} с, ` +
+            `сообщено ${Math.round((at - (playing.updatedAt ?? at)) / 1000)} с назад`
       return {
         text: [
           `now-playing ${VERSION}`,
@@ -303,7 +417,13 @@ export const register: Register = on => {
           `  ошибка: ${seen.bandFailure}`,
           '',
           `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
-
+          '',
+          'Управление и время:',
+          `  файл команд: ${commandFile ?? 'нет'}`,
+          `  последняя команда: ${seen.lastCommand}`,
+          `  ответ: ${seen.lastAnswer}`,
+          `  ошибка: ${seen.controlFailure}`,
+          `  время от Windows: ${timeline}`,
         ].join('\n'),
       }
     }
@@ -353,9 +473,22 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column" gap="sm">
         <Text>{nowText(playing, failure)}</Text>
+        {playing === null ? null : (
+          <Box flexDirection="row" gap="xs">
+            <Button key="panel-previous" label={`${GLYPHS.previous} назад`} onPress={() => void press($, 'previous')} />
+            <Button
+              key="panel-toggle"
+              label={playing.isPlaying ? `${GLYPHS.pause} пауза` : `${GLYPHS.play} играть`}
+              onPress={() => void press($, 'toggle')}
+            />
+            <Button key="panel-next" label={`вперёд ${GLYPHS.next}`} onPress={() => void press($, 'next')} />
+          </Box>
+        )}
         {row('Над полем ввода', 'top', TOP_PLACES, TOP_LABELS, chosen.top)}
         {row('Размер текста', 'size', TEXT_SIZES, SIZE_LABELS, chosen.size)}
         {row('Внизу', 'bottom', BOTTOM_PLACES, BOTTOM_LABELS, chosen.bottom)}
+        {row('Кнопки', 'controls', SWITCHES, SWITCH_LABELS, chosen.controls)}
+        {row('Время трека', 'time', SWITCHES, SWITCH_LABELS, chosen.time)}
       </Box>
     )
   })
@@ -363,7 +496,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     seen.bandCalls += 1
     seen.bandSurface = e.surface
-    const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, frame)])
+    const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, now)])
     // Whatever other plugins put in the band stays; the player goes under it.
     const others = await next(e)
     seen.bandBelow = describe(others)
@@ -374,12 +507,31 @@ export const register: Register = on => {
     }
 
     try {
-      const { Box, Text } = $.ui.resolve(e)
+      const { Box, Button, Text } = $.ui.resolve(e)
+      const time = chosen.time === 'on' ? timeText(playing, at) : undefined
       const player = (
-        <Box key="player" justifyContent={JUSTIFY[chosen.top]}>
+        <Box key="player" flexDirection="row" alignItems="center" gap="sm" justifyContent={JUSTIFY[chosen.top]}>
+          {chosen.controls === 'on' ? (
+            <Box key="controls" flexDirection="row" gap="xs">
+              <Button key="previous" label={GLYPHS.previous} plain dimColor onPress={() => void press($, 'previous')} />
+              <Button
+                key="toggle"
+                label={playing.isPlaying ? GLYPHS.pause : GLYPHS.play}
+                plain
+                dimColor
+                onPress={() => void press($, 'toggle')}
+              />
+              <Button key="next" label={GLYPHS.next} plain dimColor onPress={() => void press($, 'next')} />
+            </Box>
+          ) : null}
           <Text size={TEXT_SIZE[chosen.size]} dimColor={!playing.isPlaying} wrap="truncate-end">
             {`${equalizer(playing, at)}  ${trackText(playing)}`}
           </Text>
+          {time === undefined ? null : (
+            <Text size={TEXT_SIZE[chosen.size]} dimColor tabular>
+              {time}
+            </Text>
+          )}
         </Box>
       )
       seen.bandDrawn += 1
