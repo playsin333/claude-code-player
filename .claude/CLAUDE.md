@@ -41,7 +41,7 @@
 
 ## Релизы
 
-- При каждой версии обновить: `VERSION` в `hooks/register.tsx`, `.claude-plugin/plugin.json`, значок в `README.md`, запись в `CHANGELOG.md` (оттуда берутся заметки релиза), ожидание версии в тесте `/player debug`.
+- При каждой версии обновить: `VERSION` в `hooks/register.tsx`, `.claude-plugin/plugin.json`, значок в `README.md` и `README.ru.md`, запись в `CHANGELOG.md` (оттуда берутся заметки релиза), ожидание версии в тесте `/player debug`.
 - Релиз делает GitHub Actions (`.github/workflows/release.yml`) при пуше в `main` с новой версией.
 - Готовую версию автор разрешил переносить в `main` самостоятельно (fast-forward с рабочей ветки). Force push блокируется, настройки репозитория и релизы руками облако менять не может.
 - Коммиты от имени `playsin <335104183+playsin333@users.noreply.github.com>`, без подписи (`git config commit.gpgsign false`), без строки Co-Authored-By.

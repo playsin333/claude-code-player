@@ -2,128 +2,116 @@
 
 # claude-code-player
 
-**Что сейчас играет — прямо в Claude Code.**
+**See what's playing, right inside Claude Code.**
 
-Трек из любого приложения: Spotify, Яндекс Музыка, ВК, SoundCloud, Telegram, скачанная музыка.
+The track from any app: Spotify, Yandex Music, VK, SoundCloud, Telegram, a browser, or local files.
 
 ![version](https://img.shields.io/badge/version-2.1.0-d97757)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-3d3c38)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-3d3c38)
 ![license](https://img.shields.io/badge/license-MIT-3d3c38)
 
-<img src="assets/preview.svg" alt="Lil Peep — Gym Class над полем ввода и рядом с моделью" width="820">
+**English** · [Русский](README.ru.md)
+
+<img src="assets/demo.gif" alt="The player above the prompt: playback buttons, equalizer, track, time, synced lyrics and color palettes" width="820">
 
 </div>
 
-## Что умеет
+## Install
 
-- Показывает автора и название трека над полем ввода: слева, по центру или справа.
-- Дублирует их строчкой внизу, рядом с моделью.
-- Кнопки «назад», «пауза» и «вперёд» рядом с треком: переключить музыку можно, не уходя из Claude.
-- Время трека: сколько прошло и сколько всего, `1:23 / 3:45`.
-- Цвета: эквалайзер и слово, которое сейчас поют, в палитре Claude, «Неон», «Закат», переливающейся RGB или в любом своём цвете, который выбирается кликом, как в Paint.
-- Текст песни на месте названия: слова появляются по одному, когда их поют. Включается отдельно.
-- Статистика `/player stats`: сколько ты слушал сегодня и за неделю, топ исполнителей и треков со столбиками в цвет палитры. Считается только у тебя на компьютере и токены не тратит.
-- Лишние источники можно скрыть: например, браузер с YouTube, чтобы плеер показывал только музыку.
-- Эквалайзер `▂▅▃` на выбор: обычный, со своей плавной анимацией, или живой, который на Windows прыгает под настоящий звук. На паузе столбики лежат, а текст тускнеет.
-- Когда ничего не играет, плеер исчезает.
-- Чистит названия от мусора вроде `(Official Video)` и разбирает браузерное «Артист - Трек».
-- Все настройки меняются кнопками в `/player` и запоминаются между сессиями.
+**In the Claude app:** click **+** next to the prompt → **Plugins** → **Add marketplace**, enter `playsin333/claude-code-player`, then **Add plugin** → `now-playing`.
 
-Трек берётся из системы, а не из каждого сервиса по отдельности, поэтому плеер видит любое приложение, которое сообщает системе, что играет:
-
-- **Windows 10 и 11** — системные медиасессии, те же, что показывает плашка громкости. Нужен встроенный Windows PowerShell, он есть всегда.
-- **Linux** — плееры с MPRIS: Spotify, Firefox, Chrome и Chromium, VLC, Rhythmbox, Elisa, mpv с плагином mpris и почти все остальные. Плагин спрашивает их через `busctl`, он идёт вместе с systemd и есть почти в любом дистрибутиве. Живой эквалайзер тут пока недоступен.
-- **macOS, экспериментально** — с macOS 15.4 Apple закрыла общий доступ к «что сейчас играет», поэтому плагин спрашивает напрямую Spotify и «Музыку». Браузеры на Mac он не видит. При первом запуске macOS спросит, можно ли Claude управлять Spotify и «Музыкой». На настоящем Маке это ещё не проверено, так что если попробуешь, напиши, как вышло.
-
-## Установка
-
-**В приложении Claude:** нажми **+** рядом с полем ввода → **Plugins** → **Add marketplace**, введи `playsin333/claude-code-player`, затем **Add plugin** → `now-playing`.
-
-**В терминале:**
+**In the terminal:**
 
 ```
 /plugin install now-playing --marketplace playsin333/claude-code-player
 ```
 
+Then type `/player` to open the settings panel.
 
-## Настройки
+## Features
 
-Напиши `/player` — в чате появится панель с кнопками:
+- The artist and title above the prompt, aligned left, center or right.
+- The same line at the bottom, next to the model picker.
+- Previous, pause and next buttons beside the track, so you can switch music without leaving Claude.
+- The track time: `1:23 / 3:45`.
+- Synced lyrics in place of the title: words appear one by one as they are sung. Off by default.
+- Colors for the equalizer and the word being sung: the Claude palette, Neon, Sunset, a rainbow RGB that cycles, or any color you pick with a click.
+- Listening stats with `/player stats`: today and the last seven days, top artists and tracks. Counted on your machine only, no tokens spent.
+- Hide sources you don't want, for example a browser playing YouTube.
+- An `▂▅▃` equalizer, either with its own smooth animation or live, bouncing to the real sound (Windows).
+- On pause the bars lie flat and the text dims; when nothing plays, the player disappears.
+- Cleans titles of junk like `(Official Video)` and splits browser titles of the form `Artist - Track`.
+- Every setting is a button in `/player` and is remembered between sessions.
 
-```
-Играет: Lil Peep — Gym Class (Spotify)
-[⏮ назад] [⏸ пауза] [вперёд ⏭]
+## Platforms
 
-Над полем ввода   [выкл] [слева] [по центру] [справа]
-Размер текста     [маленький] [обычный]
-Внизу             [выкл] [вкл]
-Кнопки            [выкл] [вкл]
-Время трека       [выкл] [вкл]
-Эквалайзер        [обычный] [живой]
-Текст песни       [выкл] [вкл]
-Цвет              [без цвета] [Claude] [Неон] [Закат] [RGB] [свой]
-Источники         [Spotify: Lil Peep — Gym Class] [Chrome: YouTube]
-```
+The track comes from the operating system, not from each service, so the player sees any app that tells the system what it is playing.
 
-Если выбрать «свой», под палитрами появятся две полоски: сверху все цвета, снизу яркость выбранного. Кликаешь — цвет применяется сразу.
+| System | How | Notes |
+| --- | --- | --- |
+| **Windows 10 / 11** | System media sessions, the same ones the volume flyout shows | Full support, including the live equalizer. Uses the built-in Windows PowerShell. |
+| **Linux** | MPRIS players through `busctl` (ships with systemd) | Spotify, Firefox, Chrome/Chromium, VLC, Rhythmbox, Elisa, mpv with mpris and most others. No live equalizer yet. |
+| **macOS** (experimental) | Spotify and Music through `osascript` | Since macOS 15.4 Apple closed general now-playing access, so browsers are not visible. Not yet tested on a real Mac; reports are welcome. |
 
-В «Источниках» выделены приложения, которые плеер показывает. Нажми на приложение, чтобы скрыть его, и ещё раз, чтобы вернуть.
+## Settings
 
-То же самое можно сделать текстом:
+Type `/player` and a panel with buttons appears in the chat. The panel is in Russian for now; the text commands below do the same thing:
 
-| Команда | Что делает |
+| Command | What it does |
 | --- | --- |
-| `/player top off\|left\|center\|right` | полоса над полем ввода |
-| `/player size small\|normal` | размер её текста |
-| `/player bottom off\|on` | строчка внизу, у модели |
-| `/player buttons off\|on` | кнопки над полем ввода |
-| `/player time off\|on` | время трека |
-| `/player lyrics off\|on` | текст песни вместо названия |
-| `/player color claude\|neon\|sunset\|rgb\|mono` | палитра эквалайзера и слова, которое поют |
-| `/player color #ff5fd2` | любой свой цвет |
-| `/player equalizer frames\|live` | эквалайзер обычный или живой, под звук |
-| `/player next` / `prev` / `pause` / `play` | управлять музыкой |
-| `/player stats` | что ты слушал за день и за неделю |
-| `/player off` / `/player on` | выключить или включить всё |
-| `/player debug` | что происходит внутри, для поиска багов |
-| `/player bug` | сообщить о баге: ссылка на форму и диагностика для неё |
+| `/player top off\|left\|center\|right` | the band above the prompt |
+| `/player size small\|normal` | its text size |
+| `/player bottom off\|on` | the line at the bottom, next to the model |
+| `/player buttons off\|on` | playback buttons above the prompt |
+| `/player time off\|on` | the track time |
+| `/player lyrics off\|on` | lyrics in place of the title |
+| `/player color claude\|neon\|sunset\|rgb\|mono` | the palette for the equalizer and the sung word |
+| `/player color #ff5fd2` | any color of your own |
+| `/player equalizer frames\|live` | animated or live equalizer |
+| `/player next` / `prev` / `pause` / `play` | control the music |
+| `/player stats` | what you listened to today and this week |
+| `/player off` / `/player on` | turn everything off or on |
+| `/player debug` | what is going on inside, for bug hunting |
+| `/player bug` | report a bug: a link to the form and diagnostics for it |
 
-## Как это устроено
+## Privacy
 
-На Windows `helper/now-playing.ps1` раз в полсекунды спрашивает у системы все медиасессии и при каждом изменении печатает одну строку JSON. Десять раз в секунду он ещё читает индикатор громкости, тот же, что в микшере громкости: по нему пляшет живой эквалайзер, если его выбрать. Мод (`hooks/register.tsx`) запускает скрипт, читает его вывод, выбирает, что показать, и рисует плеер. Когда нажимаешь кнопку, мод кладёт команду во временный файл, а скрипт в течение десятой доли секунды забирает её и передаёт приложению.
+The model never sees the track. Only when lyrics are on, the artist and title are sent to [lrclib.net](https://lrclib.net), an open lyrics database, to fetch the synced text. Stats stay on your machine.
 
-На Linux и Mac скрипт не нужен: мод сам раз в секунду спрашивает плееры, через `busctl` или `osascript`, и через них же нажимает кнопки. Модель эти данные не видит. В интернет уходят только исполнитель и название трека, и только если включить текст песни: тогда плагин ищет его на [lrclib.net](https://lrclib.net), в открытой базе текстов. Там почти всегда известно, когда начинается каждая строка, а время отдельных слов плагин рассчитывает сам, по их длине.
+## How it works
+
+On Windows, `helper/now-playing.ps1` asks the system for all media sessions twice a second and prints one line of JSON on every change. Ten times a second it also reads the peak meter, the same one the volume mixer shows, which drives the live equalizer. The mod (`hooks/register.tsx`) starts the script, reads its output, picks what to show and draws the player. A button press is written to a temporary file that the script picks up within a tenth of a second and passes to the app.
+
+On Linux and Mac no script is needed: the mod polls the players once a second through `busctl` or `osascript` and presses their buttons the same way.
 
 ```
-helper/now-playing.ps1   читает трек из Windows
-hooks/linux.ts           плееры Linux через MPRIS и busctl
-hooks/mac.ts             Spotify и «Музыка» на Mac через osascript
-hooks/register.tsx       рисует плеер и отвечает на /player
-hooks/equalizer.tsx      эквалайзер, который анимируется сам
-hooks/clock.tsx          время трека, которое обновляется само
-hooks/lyrics.tsx         текст песни, который появляется по словам
-hooks/picker.tsx         полоски для выбора своего цвета
-hooks/colors.ts          палитры и расчёт оттенков
-hooks/stats.ts           подсчёт статистики прослушивания
-types/index.d.ts         типы состояния плеера
-tests/                   тесты (claude plugin test .)
+helper/now-playing.ps1   reads the track from Windows
+hooks/linux.ts           Linux players over MPRIS and busctl
+hooks/mac.ts             Spotify and Music on Mac via osascript
+hooks/register.tsx       draws the player and answers /player
+hooks/equalizer.tsx      the self-animating equalizer
+hooks/clock.tsx          the self-updating track time
+hooks/lyrics.tsx         lyrics that appear word by word
+hooks/picker.tsx         the strips for picking your own color
+hooks/colors.ts          palettes and shade math
+hooks/stats.ts           listening stats
+types/index.d.ts         player state types
+tests/                   tests (claude plugin test .)
 ```
 
-## Баги, вопросы, идеи
+## Bugs, questions, ideas
 
-Пиши в [Issues](https://github.com/playsin333/claude-code-player/issues), там на каждую тему своё обсуждение:
+Open an [issue](https://github.com/playsin333/claude-code-player/issues):
 
-- [сообщить о баге](https://github.com/playsin333/claude-code-player/issues/new?template=bug.yml): проще всего сначала набрать в Claude `/player bug` и вставить в форму то, что он ответит;
-- [задать вопрос или предложить идею](https://github.com/playsin333/claude-code-player/issues/new?template=question.yml).
+- [report a bug](https://github.com/playsin333/claude-code-player/issues/new?template=bug.yml): the easiest way is to run `/player bug` in Claude first and paste what it prints into the form;
+- [ask a question or suggest an idea](https://github.com/playsin333/claude-code-player/issues/new?template=question.yml).
 
-Обе ссылки есть и внизу панели `/player`.
+## Roadmap
 
-## Планы
+- Live equalizer on Linux, via PipeWire or PulseAudio.
+- More players on Mac, if Apple opens access again.
 
-- Живой эквалайзер на Linux, через PipeWire или PulseAudio.
-- Больше плееров на Mac, если Apple снова откроет доступ.
+Changes are listed in [CHANGELOG.md](CHANGELOG.md) (in Russian).
 
-История изменений — в [CHANGELOG.md](CHANGELOG.md).
-
-Лицензия — [MIT](LICENSE).
+License: [MIT](LICENSE).
