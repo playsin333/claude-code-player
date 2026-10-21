@@ -10,7 +10,7 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const frame = atom({ plugin: 'now-playing', key: 'frame' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.1.0'
+const VERSION = '1.1.1'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'auto', 'model']
@@ -168,12 +168,34 @@ const HELP = [
 const summary = (chosen: PlayerSettings): string =>
   `Над полем: ${TOP_LABELS[chosen.top]} · Размер: ${SIZE_LABELS[chosen.size]} · Внизу: ${BOTTOM_LABELS[chosen.bottom]}`
 
+// Readable names for the app ids Windows reports, first match wins.
+const APP_NAMES: readonly [RegExp, string][] = [
+  [/spotify/i, 'Spotify'],
+  [/yandex\.?music/i, 'Яндекс Музыка'],
+  [/yandex/i, 'Яндекс Браузер'],
+  [/soundcloud/i, 'SoundCloud'],
+  [/telegram/i, 'Telegram'],
+  [/^chrome\._crx_/i, 'приложение Chrome'],
+  [/^msedge\._crx_/i, 'приложение Edge'],
+  [/chrome/i, 'Chrome'],
+  [/msedge/i, 'Edge'],
+  [/firefox/i, 'Firefox'],
+  [/opera/i, 'Opera'],
+  [/zunemusic|media\.?player/i, 'Медиаплеер Windows'],
+  [/aimp/i, 'AIMP'],
+  [/foobar/i, 'foobar2000'],
+  [/vlc/i, 'VLC'],
+]
+
+export const appName = (id: string): string =>
+  APP_NAMES.find(([pattern]) => pattern.test(id))?.[1] ?? id.replace(/\.exe$/i, '').replace(/[_!].*$/, '')
+
 const nowText = (playing: Track | null, failure: string | null): string =>
   failure !== null
     ? `Ошибка: ${failure}`
     : playing === null
       ? 'Сейчас ничего не играет.'
-      : `${playing.isPlaying ? 'Играет' : 'На паузе'}: ${trackText(playing)} (${playing.app})`
+      : `${playing.isPlaying ? 'Играет' : 'На паузе'}: ${trackText(playing)} (${appName(playing.app)})`
 
 // What the drawing hooks have seen since the module loaded, for /player debug.
 // Module variables on purpose: a render hook may not write state.
@@ -270,6 +292,7 @@ export const register: Register = on => {
           `Поверхности сессии: ${surfaces.length === 0 ? 'нет' : surfaces.join(', ')}`,
           summary(chosen),
           nowText(playing, failure),
+          `Источник как его называет Windows: ${playing?.app ?? '—'}`,
           '',
           'Полоса над полем ввода:',
           `  приложение просило нарисовать: ${seen.bandCalls} раз`,
@@ -346,8 +369,17 @@ export const register: Register = on => {
 
     if (chosen.bottom !== 'auto' || playing === null) return next(e)
 
+    // The desktop draws no added mode label, so the whole row is drawn here.
+    const labels = await next(e)
+    const { Box, Text } = $.ui.resolve(e)
     seen.modeDrawn += 1
-    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, lineText(playing, at)] } })
+
+    return (
+      <Box flexDirection="row" gap="sm">
+        {labels}
+        <Text dimColor>{lineText(playing, at)}</Text>
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

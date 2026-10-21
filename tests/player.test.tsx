@@ -146,7 +146,8 @@ test('the bottom line goes beside the model or beside Auto', async ($, on) => {
   expect(statuses.at(-1)).toBe('')
 
   const after = await $.ui.mount({ ...MODE, surface: 'desktop' })
-  expect((await after.find({ type: 'Text', text: /Auto/ }))?.text).toBe('Auto & ▂▅▃  Lil Peep — Gym Class')
+  expect((await after.find({ type: 'Text', text: /Auto/ }))?.text).toBe('Auto')
+  expect((await after.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
   await after.unmount()
 })
 
@@ -157,7 +158,7 @@ test('the /player panel changes settings with its buttons', async ($, on) => {
   await clock.settle()
 
   const panel = await $.ui.mount({ ...PANEL, surface: 'desktop' })
-  expect((await panel.find({ type: 'Text', text: /Играет/ }))?.text).toBe('Играет: Lil Peep — Gym Class (Spotify.exe)')
+  expect((await panel.find({ type: 'Text', text: /Играет/ }))?.text).toBe('Играет: Lil Peep — Gym Class (Spotify)')
   expect((await panel.find({ key: 'top-center' }))?.props.variant).toBe('primary')
   await panel.press({ key: 'top-left' })
   expect((await panel.find({ key: 'top-left' }))?.props.variant).toBe('primary')
@@ -207,11 +208,25 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.1.0')
+  expect(answer.text).toContain('now-playing 1.1.1')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')
   expect(answer.text).toContain('Поверхности сессии: desktop')
+})
+
+test('apps get readable names', async ($, on) => {
+  const clock = mock.clock(on)
+  await start(
+    on,
+    [line({ app: 'Chrome._crx_eikjhbkpemcmdeeeamdpkgabmk', artist: 'Lil Peep', title: 'Gym Class', isPlaying: true })],
+    clock,
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  expect((await $.command.run(run(''))).text).toContain('Играет: Lil Peep — Gym Class (приложение Chrome)')
+  expect((await $.command.run(run('debug'))).text).toContain('Windows: Chrome._crx_eikjhbkpemcmdeeeamdpkgabmk')
 })
 
 test('an unknown /player word gets the help', async ($, on) => {
