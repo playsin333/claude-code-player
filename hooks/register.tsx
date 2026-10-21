@@ -15,6 +15,7 @@ import type {
 } from '../types'
 
 import { EQUALIZER, EQUALIZER_PAUSED, FRAME_MS } from './equalizer'
+import type { EqualizerProps } from './equalizer'
 import { parseLrc, reveal } from './lyrics'
 import type { LyricsProps } from './lyrics'
 
@@ -36,7 +37,7 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const now = atom({ plugin: 'now-playing', key: 'now' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.5.0'
+const VERSION = '1.6.0'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -61,6 +62,15 @@ const DURATION_FAR_S = 10
 // A failed lyrics search is tried again after this long, not on every report.
 const LYRICS_RETRY_MS = 60_000
 const RESTART_MS = 3000
+// The live equalizer's heights, lowest to highest (no ▄, as in the frames).
+const METER_GLYPHS = ['▁', '▂', '▃', '▅', '▆', '▇']
+// Per reading, ten a second: the loudest recent peak, the bars' top, halves
+// in about three seconds, so the bars dance at any volume.
+const METER_DECAY = 0.98
+// A peak below this is silence.
+const METER_FLOOR = 0.02
+// Readings come at least once a second; older ones mean the meter is gone.
+const METER_FRESH_MS = 2000
 const MAX_FAILED_STARTS = 5
 const STDERR_KEPT = 300
 
@@ -131,8 +141,37 @@ export const cleanTrack = <T extends Track>(raw: T): T => {
 export const trackText = (one: Track): string =>
   one.artist === '' ? one.title : `${one.artist} — ${one.title}`
 
+// The helper's meter: the bars' top, the last three readings (overall, left,
+// right) newest first, the bars they make and when the last one came.
+// Module variables on purpose: ten readings a second must not redraw anything.
+const meter = { top: 0, readings: [] as number[][], bars: undefined as string | undefined, at: -Infinity }
+
+// Turns one reading into the live bars: the left channel now, the overall
+// peak a reading ago, the right channel two ago, a wave rather than three
+// equal bars; each scaled to the loudest recent peak.
+const readMeter = (levels: readonly number[], at: number): void => {
+  const [peak = 0, left = peak, right = peak] = levels
+  meter.top = Math.max(peak, meter.top * METER_DECAY, METER_FLOOR)
+  meter.readings = [[peak, left, right], ...meter.readings].slice(0, 3)
+  const [now = [], before = now, earlier = before] = meter.readings
+  const bar = (value = 0): string =>
+    value < METER_FLOOR ? '▁' : (METER_GLYPHS[Math.min(5, Math.round((value / meter.top) * 5))] ?? '▁')
+  meter.bars = `${bar(now[1])}${bar(before[0])}${bar(earlier[2])}`
+  meter.at = at
+}
+
+// The live bars while the meter keeps reading, else undefined.
+const liveBars = (at: number): string | undefined => (at - meter.at < METER_FRESH_MS ? meter.bars : undefined)
+
 const equalizer = (one: Track, at: number): string =>
-  one.isPlaying ? (EQUALIZER[Math.floor(at / FRAME_MS) % EQUALIZER.length] ?? EQUALIZER_PAUSED) : EQUALIZER_PAUSED
+  one.isPlaying
+    ? (liveBars(at) ?? EQUALIZER[Math.floor(at / FRAME_MS) % EQUALIZER.length] ?? EQUALIZER_PAUSED)
+    : EQUALIZER_PAUSED
+
+const equalizerProps = (one: Track, at: number, size: EqualizerProps['size']): EqualizerProps => {
+  const bars = liveBars(at)
+  return { isPlaying: one.isPlaying, size, ...(bars === undefined ? {} : { bars }) }
+}
 
 const clip = (text: string, max: number): string =>
   text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
@@ -334,7 +373,15 @@ const toggleSource = async ($: EngineInterface, app: string): Promise<void> => {
 let commandFile: string | null = null
 
 // What the helper prints: its command file, the sessions, a press's outcome, or a failure.
-type HelperLine = { commands?: string; sessions?: Session[]; command?: string; app?: string; ok?: boolean; error?: string }
+type HelperLine = {
+  commands?: string
+  sessions?: Session[]
+  levels?: number[]
+  command?: string
+  app?: string
+  ok?: boolean
+  error?: string
+}
 
 // Feeds the helper's JSON lines into `sessions` for the session's life,
 // restarting it if it dies and giving up if it keeps failing to start.
@@ -372,6 +419,10 @@ const watch = async ($: EngineInterface): Promise<void> => {
             commandFile = message.commands
             continue
           }
+          if (message.levels !== undefined) {
+            readMeter(message.levels, await $.clock.now())
+            continue
+          }
           if (message.command !== undefined) {
             const outcome = message.ok === true ? 'выполнило' : 'отказалось'
             seen.lastAnswer = `${message.command} в ${message.app ?? '—'}: приложение ${outcome}`
@@ -399,6 +450,7 @@ const watch = async ($: EngineInterface): Promise<void> => {
       stderr = thrown instanceof Error ? thrown.message : String(thrown)
     }
     commandFile = null
+    meter.at = -Infinity
 
     if (!isHeard) {
       failedStarts += 1
@@ -567,6 +619,11 @@ const debugText = async ($: EngineInterface): Promise<string> => {
       `  последний раз не рисовал, потому что: ${seen.bandSkipped}`,
       `  ошибка: ${seen.bandFailure}`,
       `  часы спрашивали время: ${seen.clockAsks} раз`,
+  `  эквалайзер: ${
+    liveBars(at) === undefined
+      ? 'свои кадры, громкость Windows не читается'
+      : `живой, последнее чтение ${Math.round(at - meter.at)} мс назад`
+  }`,
       '',
       `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
       '',
@@ -768,11 +825,12 @@ export const register: Register = on => {
 
   // The band's clock and lyrics ask for the time; the answer is their next props.
   on('ui.message', async ($, e, next) => {
-    if (e.element !== 'clock' && e.element !== 'lyrics') return next(e)
+    if (e.element !== 'clock' && e.element !== 'lyrics' && e.element !== 'equalizer') return next(e)
     const [chosen, playing, sung] = await Promise.all([read($, settings), read($, track), read($, lyrics)])
     if (playing === null) return next(e)
     const [at, size] = [await $.clock.now(), TEXT_SIZE[chosen.size]]
 
+    if (e.element === 'equalizer') return { props: equalizerProps(playing, at, size) }
     if (e.element === 'lyrics') {
       const lines = linesFor(chosen, playing, sung)
       return lines === undefined ? next(e) : { props: lyricsProps(playing, lines, at, size) }
@@ -836,7 +894,7 @@ export const register: Register = on => {
               {equalizer(playing, at)}
             </Text>
           ) : (
-            <Client key="equalizer" module="./equalizer.tsx" props={{ isPlaying: playing.isPlaying, size }} />
+            <Client key="equalizer" module="./equalizer.tsx" props={equalizerProps(playing, at, size)} />
           )}
           {lines === undefined ? (
             <Text size={size} dimColor={!playing.isPlaying} wrap="truncate-end">
