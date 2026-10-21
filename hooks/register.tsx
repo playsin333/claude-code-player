@@ -10,10 +10,10 @@ const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAU
 const frame = atom({ plugin: 'now-playing', key: 'frame' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
 
-const VERSION = '1.1.1'
+const VERSION = '1.1.2'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
-const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'auto', 'model']
+const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
 const EQUALIZER = ['▂▅▃', '▅▃▇', '▃▇▂', '▇▂▅', '▄▆▃', '▆▃▄']
 const EQUALIZER_PAUSED = '▁▁▁'
 const FRAME_MS = 300
@@ -27,7 +27,9 @@ const TEXT_SIZE = { small: 'caption', normal: 'body' } as const
 
 const TOP_LABELS: Record<TopPlace, string> = { off: 'выкл', left: 'слева', center: 'по центру', right: 'справа' }
 const SIZE_LABELS: Record<TextSize, string> = { small: 'маленький', normal: 'обычный' }
-const BOTTOM_LABELS: Record<BottomPlace, string> = { off: 'выкл', auto: 'у «Auto»', model: 'у модели' }
+const BOTTOM_LABELS: Record<BottomPlace, string> = { off: 'выкл', model: 'вкл' }
+// What `/player bottom` accepts; 1.1.0's `auto` now means the line beside the model.
+const BOTTOM_WORDS: Record<string, BottomPlace> = { off: 'off', on: 'model', model: 'model', auto: 'model' }
 
 // Tags that streaming sites and browsers append to titles.
 const JUNK =
@@ -71,7 +73,7 @@ const loadSettings = async ($: EngineInterface): Promise<PlayerSettings> => {
     return {
       top: isOneOf(TOP_PLACES, saved.top) ? saved.top : DEFAULTS.top,
       size: isOneOf(TEXT_SIZES, saved.size) ? saved.size : DEFAULTS.size,
-      bottom: isOneOf(BOTTOM_PLACES, saved.bottom) ? saved.bottom : DEFAULTS.bottom,
+      bottom: BOTTOM_WORDS[String(saved.bottom)] ?? DEFAULTS.bottom,
     }
   }
   const mode = await $.store.get('mode')
@@ -160,7 +162,7 @@ const HELP = [
   '',
   '/player top off|left|center|right — полоса над полем ввода',
   '/player size small|normal         — размер её текста',
-  '/player bottom off|auto|model     — строчка внизу: у «Auto» или у модели',
+  '/player bottom off|on             — строчка внизу, у модели',
   '/player off | on                  — выключить или включить всё',
   '/player debug                     — что происходит внутри (для поиска багов)',
 ].join('\n')
@@ -206,8 +208,6 @@ const seen = {
   bandBelow: '—',
   bandSkipped: '—',
   bandFailure: '—',
-  modeCalls: 0,
-  modeDrawn: 0,
   panelDrawn: 0,
 }
 
@@ -231,21 +231,21 @@ const applyArgs = async ($: EngineInterface, words: string[]): Promise<string | 
     await choose($, { size: value })
     return `Размер текста: ${SIZE_LABELS[value]}.`
   }
-  if (what === 'bottom' && isOneOf(BOTTOM_PLACES, value)) {
-    await choose($, { bottom: value })
-    return `Строчка внизу: ${BOTTOM_LABELS[value]}.`
+  const bottom = value === undefined ? undefined : BOTTOM_WORDS[value]
+  if (what === 'bottom' && bottom !== undefined) {
+    await choose($, { bottom })
+    return `Строчка внизу: ${BOTTOM_LABELS[bottom]}.`
   }
   if (value !== undefined) return null
 
   // Whole-player switches, plus the 1.0 commands so old habits keep working.
   const top = current.top === 'off' ? DEFAULTS.top : current.top
-  const bottom = current.bottom === 'off' ? DEFAULTS.bottom : current.bottom
   const switches: Record<string, Partial<PlayerSettings>> = {
     off: { top: 'off', bottom: 'off' },
-    on: { top, bottom },
-    both: { top, bottom },
+    on: { top, bottom: 'model' },
+    both: { top, bottom: 'model' },
     bar: { top, bottom: 'off' },
-    line: { top: 'off', bottom },
+    line: { top: 'off', bottom: 'model' },
   }
   const change = what === undefined ? undefined : switches[what]
   if (change === undefined) return null
@@ -302,10 +302,6 @@ export const register: Register = on => {
           `  последний раз не рисовал, потому что: ${seen.bandSkipped}`,
           `  ошибка: ${seen.bandFailure}`,
           '',
-          'Строчка у «Auto»:',
-          `  приложение просило нарисовать: ${seen.modeCalls} раз`,
-          `  трек добавлен: ${seen.modeDrawn} раз`,
-          '',
           `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
         ].join('\n'),
       }
@@ -359,25 +355,6 @@ export const register: Register = on => {
         {row('Над полем ввода', 'top', TOP_PLACES, TOP_LABELS, chosen.top)}
         {row('Размер текста', 'size', TEXT_SIZES, SIZE_LABELS, chosen.size)}
         {row('Внизу', 'bottom', BOTTOM_PLACES, BOTTOM_LABELS, chosen.bottom)}
-      </Box>
-    )
-  })
-
-  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
-    seen.modeCalls += 1
-    const [chosen, playing, at] = await Promise.all([read($, settings), read($, track), read($, frame)])
-
-    if (chosen.bottom !== 'auto' || playing === null) return next(e)
-
-    // The desktop draws no added mode label, so the whole row is drawn here.
-    const labels = await next(e)
-    const { Box, Text } = $.ui.resolve(e)
-    seen.modeDrawn += 1
-
-    return (
-      <Box flexDirection="row" gap="sm">
-        {labels}
-        <Text dimColor>{lineText(playing, at)}</Text>
       </Box>
     )
   })

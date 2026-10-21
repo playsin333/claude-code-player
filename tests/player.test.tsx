@@ -21,12 +21,6 @@ const PANEL = {
   props: { command: 'player', args: '', text: '', isErrored: false },
 } as const
 
-const MODE = {
-  plugin: 'now-playing',
-  component: 'SessionMode',
-  props: { modes: ['Auto'] },
-} as const
-
 const run = (args: string) => ({
   command: 'player',
   args,
@@ -60,10 +54,9 @@ const start = async (
     await clock.sleep(60_000)
     return { value: { code: 0, signal: null } }
   })
-  // The engine's own drawings: the mode labels joined, anything else a stand-in.
+  // The engine's own drawing, a stand-in beneath the plugin.
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
-    if (e.component === 'SessionMode') return <Text>{e.props.modes.join(' & ')}</Text>
     return <Text>engine</Text>
   })
   return statuses
@@ -131,24 +124,28 @@ test('/player top and size move and resize the band', async ($, on) => {
   await hidden.unmount()
 })
 
-test('the bottom line goes beside the model or beside Auto', async ($, on) => {
+test('/player bottom turns the line beside the model off and on', async ($, on) => {
   const clock = mock.clock(on)
   const statuses = await start(on, [GYM_CLASS], clock)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.settle()
   expect(statuses.at(-1)).toContain('Lil Peep — Gym Class')
 
-  const before = await $.ui.mount({ ...MODE, surface: 'desktop' })
-  expect((await before.find({ type: 'Text', text: /Auto/ }))?.text).toBe('Auto')
-  await before.unmount()
-
-  await $.command.run(run('bottom auto'))
+  expect((await $.command.run(run('bottom off'))).text).toBe('Строчка внизу: выкл.')
   expect(statuses.at(-1)).toBe('')
 
-  const after = await $.ui.mount({ ...MODE, surface: 'desktop' })
-  expect((await after.find({ type: 'Text', text: /Auto/ }))?.text).toBe('Auto')
-  expect((await after.find({ type: 'Text', text: /Gym Class/ }))?.text).toBe('▂▅▃  Lil Peep — Gym Class')
-  await after.unmount()
+  expect((await $.command.run(run('bottom on'))).text).toBe('Строчка внизу: вкл.')
+  expect(statuses.at(-1)).toContain('Lil Peep — Gym Class')
+})
+
+test('a bottom line saved beside Auto moves beside the model', async ($, on) => {
+  const clock = mock.clock(on)
+  const statuses = await start(on, [GYM_CLASS], clock, { settings: { top: 'left', size: 'normal', bottom: 'auto' } })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  expect(statuses.at(-1)).toContain('Lil Peep — Gym Class')
+  expect((await $.command.run(run(''))).text).toContain('Над полем: слева · Размер: обычный · Внизу: вкл')
 })
 
 test('the /player panel changes settings with its buttons', async ($, on) => {
@@ -179,7 +176,7 @@ test('settings saved by 1.0 carry over', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /Gym Class/ })).toBeUndefined()
   await ui.unmount()
 
-  expect((await $.command.run(run(''))).text).toContain('Над полем: выкл · Размер: маленький · Внизу: у модели')
+  expect((await $.command.run(run(''))).text).toContain('Над полем: выкл · Размер: маленький · Внизу: вкл')
 })
 
 test('/player off hides everything and /player on brings it back', async ($, on) => {
@@ -208,7 +205,7 @@ test('/player debug reports what the drawings saw', async ($, on) => {
   await ui.unmount()
 
   const answer = await $.command.run(run('debug'))
-  expect(answer.text).toContain('now-playing 1.1.1')
+  expect(answer.text).toContain('now-playing 1.1.2')
   expect(answer.text).toContain('Играет: Lil Peep — Gym Class')
   expect(answer.text).toMatch(/плеер нарисован: [1-9]/)
   expect(answer.text).toContain('последняя поверхность: desktop')

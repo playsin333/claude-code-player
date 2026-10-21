@@ -11,8 +11,8 @@ export type TopPlace = 'off' | 'left' | 'center' | 'right'
 // The band's text size.
 export type TextSize = 'small' | 'normal'
 
-// Where the bottom line sits: beside the mode label, beside the model, or off.
-export type BottomPlace = 'off' | 'auto' | 'model'
+// The line beside the model picker, or off.
+export type BottomPlace = 'off' | 'model'
 
 export type PlayerSettings = {
   top: TopPlace
