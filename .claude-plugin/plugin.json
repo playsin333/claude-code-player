@@ -2,6 +2,10 @@
   "name": "now-playing",
   "version": "1.0.0",
   "description": "Shows the track playing in any app: above the prompt and next to the model picker",
-  "author": { "name": "playsin333" },
-  "types": "./types/index.d.ts"
+  "author": {
+    "name": "playsin333"
+  },
+  "types": "./types/index.d.ts",
+  "license": "MIT",
+  "repository": "https://github.com/playsin333/claude-code-player"
 }

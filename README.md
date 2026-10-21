@@ -9,6 +9,7 @@
 ![version](https://img.shields.io/badge/version-1.0.0-d97757)
 ![platform](https://img.shields.io/badge/platform-Windows-3d3c38)
 ![Claude Code](https://img.shields.io/badge/Claude%20Code-plugin-3d3c38)
+![license](https://img.shields.io/badge/license-MIT-3d3c38)
 
 <img src="assets/preview.svg" alt="Lil Peep — Gym Class над полем ввода и рядом с моделью" width="820">
 
@@ -65,3 +66,5 @@ tests/                   тесты (claude plugin test .)
 - Linux и macOS.
 
 История изменений — в [CHANGELOG.md](CHANGELOG.md).
+
+Лицензия — [MIT](LICENSE).
