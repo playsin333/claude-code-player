@@ -19,8 +19,10 @@ import { PICKER_HUES, hueStrip, paletteColors, paletteSample, parseHex, shadeStr
 import type { Colors } from './colors'
 import { EQUALIZER, EQUALIZER_PAUSED, FRAME_MS, barColor } from './equalizer'
 import type { EqualizerProps } from './equalizer'
+import { listNamesArgv, mprisSession, playerArgv, playerNames, pressArgv as linuxPressArgv } from './linux'
 import { parseLrc, reveal } from './lyrics'
 import type { LyricsProps } from './lyrics'
+import { macSessions, pressArgv as macPressArgv, readArgv as macReadArgv } from './mac'
 import type { PickerClick, PickerProps } from './picker'
 import {
   STATS_TITLE,
@@ -81,6 +83,9 @@ const DURATION_FAR_S = 10
 // A failed lyrics search is tried again after this long, not on every report.
 const LYRICS_RETRY_MS = 60_000
 const RESTART_MS = 3000
+// Linux and Mac: how often the players are asked, and how long a command may take.
+const POLL_MS = 1000
+const RUN_TIMEOUT_MS = 5000
 // Statistics are written to the store this often, by one session of several.
 const STATS_MS = 30_000
 // Another session that wrote this recently is the one counting.
@@ -505,10 +510,58 @@ const toggleSource = async ($: EngineInterface, app: string): Promise<void> => {
   await choose($, { hidden: hidden.includes(app) ? hidden.filter(one => one !== app) : [...hidden, app] })
 }
 
-// The running helper's command file, from its first line; null while none runs.
-let commandFile: string | null = null
+type Platform = 'windows' | 'linux' | 'mac'
 
-// What the helper prints: its command file, the sessions, a press's outcome, or a failure.
+const PLATFORM_NAMES: Record<Platform, string> = { windows: 'Windows', linux: 'Linux', mac: 'macOS (экспериментально)' }
+
+// Where the plugin runs, once it has looked.
+let platform: Platform | undefined
+// How a press reaches the player, set by the running source; null while none runs.
+let presser: ((command: Command, one: Track) => Promise<void>) | null = null
+// The Windows helper's command file, from its first line, for /player debug.
+let commandFile: string | null = null
+// Cuts a polled source's wait short, so what a press did shows at once.
+let pollWake: AbortController | null = null
+
+// Where the plugin runs: a Windows path says Windows; else uname, which only
+// Windows lacks (or answers as MINGW and the like, under Git Bash).
+const platformOf = async ($: EngineInterface): Promise<Platform> => {
+  if (/^[A-Za-z]:[\\/]|\\/.test($.plugin.root)) return 'windows'
+  try {
+    const name = (await $.process.run(['uname', '-s'], { timeoutMs: RUN_TIMEOUT_MS })).stdout.trim()
+    return name === 'Darwin' ? 'mac' : /^(MINGW|MSYS|CYGWIN)/i.test(name) ? 'windows' : 'linux'
+  } catch {
+    return 'windows'
+  }
+}
+
+// Takes a report of every session: anchors their times, lists the sources,
+// shows one.
+const report = async ($: EngineInterface, raw: readonly Session[]): Promise<void> => {
+  const [receivedAt, before] = await Promise.all([$.clock.now(), read($, sessions)])
+  // A position with no report time counts from when it was first seen, not
+  // from each report: a report about another app must not reset it.
+  const reported = raw.map(one => {
+    const clean = cleanTrack(one)
+    const seenBefore = before.find(was => was.app === clean.app && was.title === clean.title && was.position === clean.position)
+    return { ...clean, updatedAt: (one.updatedAt ?? 0) > 0 ? one.updatedAt : (seenBefore?.updatedAt ?? receivedAt) }
+  })
+  await update($, error, () => null)
+  await update($, now, () => receivedAt)
+  await update($, sessions, () => reported)
+  await listSources($, reported)
+  await select($)
+}
+
+// No source, no sessions: nothing shown.
+const reportNone = async ($: EngineInterface): Promise<void> => {
+  await update($, sessions, () => [])
+  await listSources($, [])
+  await select($)
+}
+
+// What the Windows helper prints: its command file, the sessions, the
+// meter, a press's outcome, or a failure.
 type HelperLine = {
   commands?: string
   sessions?: Session[]
@@ -519,9 +572,9 @@ type HelperLine = {
   error?: string
 }
 
-// Feeds the helper's JSON lines into `sessions` for the session's life,
+// Windows: feeds the helper's JSON lines in for the session's life,
 // restarting it if it dies and giving up if it keeps failing to start.
-const watch = async ($: EngineInterface): Promise<void> => {
+const watchWindows = async ($: EngineInterface): Promise<void> => {
   const script = `${$.plugin.root}\\helper\\now-playing.ps1`
   let failedStarts = 0
 
@@ -552,7 +605,11 @@ const watch = async ($: EngineInterface): Promise<void> => {
           isHeard = true
           failedStarts = 0
           if (message.commands !== undefined) {
-            commandFile = message.commands
+            const file = message.commands
+            commandFile = file
+            presser = async (command, one) => {
+              await $.fs.write(file, JSON.stringify({ command, app: one.app, title: one.title }))
+            }
             continue
           }
           if (message.levels !== undefined) {
@@ -564,40 +621,99 @@ const watch = async ($: EngineInterface): Promise<void> => {
             seen.lastAnswer = `${message.command} в ${message.app ?? '—'}: приложение ${outcome}`
             continue
           }
-          if (message.sessions === undefined) continue
-          const [receivedAt, before] = await Promise.all([$.clock.now(), read($, sessions)])
-          // A position with no report time counts from when it was first seen,
-          // not from each report: a report about another app must not reset it.
-          const reported = message.sessions.map(one => {
-            const clean = cleanTrack(one)
-            const seenBefore = before.find(
-              was => was.app === clean.app && was.title === clean.title && was.position === clean.position,
-            )
-            return { ...clean, updatedAt: (one.updatedAt ?? 0) > 0 ? one.updatedAt : (seenBefore?.updatedAt ?? receivedAt) }
-          })
-          await update($, error, () => null)
-          await update($, now, () => receivedAt)
-          await update($, sessions, () => reported)
-          await listSources($, reported)
-          await select($)
+          if (message.sessions !== undefined) await report($, message.sessions)
         }
       }
     } catch (thrown) {
       stderr = thrown instanceof Error ? thrown.message : String(thrown)
     }
     commandFile = null
+    presser = null
     meter.at = -Infinity
 
     if (!isHeard) {
       failedStarts += 1
       const detail = stderr.trim() === '' ? '' : ` (${stderr.trim()})`
-      await update($, error, () => `помощник не запустился или сразу закрылся${detail}. Пока плеер работает только на Windows.`)
+      await update($, error, () => `помощник не запустился или сразу закрылся${detail}.`)
     }
-    await update($, sessions, () => [])
-    await listSources($, [])
-    await select($)
+    await reportNone($)
     await $.clock.sleep(RESTART_MS)
   }
+}
+
+// A source the plugin asks itself, once a second: Linux, Mac.
+type PolledSource = {
+  read: ($: EngineInterface, at: number) => Promise<Session[]>
+  pressArgv: (app: string, command: Command) => string[] | undefined
+  failure: (detail: string) => string
+}
+
+// Runs a command to its end; its output, or a throw saying why it failed.
+const runOk = async ($: EngineInterface, argv: readonly string[]): Promise<string> => {
+  const { exitCode, stdout, stderr } = await $.process.run(argv, { timeoutMs: RUN_TIMEOUT_MS })
+  if (exitCode !== 0) throw new Error(stderr.trim() === '' ? `${argv[0] ?? ''}: код ${exitCode}` : stderr.trim())
+  return stdout
+}
+
+const LINUX: PolledSource = {
+  read: async ($, at) => {
+    const names = playerNames(await runOk($, listNamesArgv()))
+    const found = await Promise.all(
+      names.map(async name => {
+        try {
+          // A player that keeps no position fails the call, yet prints the rest.
+          const { stdout } = await $.process.run(playerArgv(name), { timeoutMs: RUN_TIMEOUT_MS })
+          return mprisSession(name, stdout, at)
+        } catch {
+          // A player that went away between the two calls.
+          return undefined
+        }
+      }),
+    )
+    return found.filter((one): one is Session => one !== undefined)
+  },
+  pressArgv: (app, command) => linuxPressArgv(app, command),
+  failure: detail =>
+    `не получилось спросить плееры через busctl (${detail}). На Linux плеер видит плееры с MPRIS через busctl из systemd.`,
+}
+
+const MAC: PolledSource = {
+  read: async ($, at) => macSessions(await runOk($, macReadArgv()), at),
+  pressArgv: (app, command) => macPressArgv(app, command),
+  failure: detail => `osascript не ответил (${detail}). На Mac плеер пока видит только Spotify и «Музыку», экспериментально.`,
+}
+
+// Linux, Mac: asks the source once a second for the session's life, and at
+// once after a press.
+const watchPolled = async ($: EngineInterface, source: PolledSource): Promise<void> => {
+  presser = async (command, one) => {
+    const argv = source.pressArgv(one.app, command)
+    if (argv === undefined) throw new Error(`${appName(one.app)} так не управляется`)
+    const { exitCode, stderr } = await $.process.run(argv, { timeoutMs: RUN_TIMEOUT_MS })
+    seen.lastAnswer = `${command} в ${one.app}: ${exitCode === 0 ? 'приложение выполнило' : `приложение отказалось (${stderr.trim()})`}`
+    pollWake?.abort()
+  }
+  for (;;) {
+    try {
+      await report($, await source.read($, await $.clock.now()))
+    } catch (thrown) {
+      await update($, error, () => source.failure(thrown instanceof Error ? thrown.message : String(thrown)))
+      await reportNone($)
+    }
+    const wake = new AbortController()
+    pollWake = wake
+    await $.clock.sleep(POLL_MS, { signal: wake.signal }).catch((thrown: unknown) => {
+      // A press cut the wait short; anything else (the module unloading) ends the loop.
+      if (!wake.signal.aborted) throw thrown
+    })
+  }
+}
+
+// Watches what plays, the way this platform allows.
+const watch = async ($: EngineInterface): Promise<void> => {
+  platform = await platformOf($)
+  if (platform === 'windows') return watchWindows($)
+  return watchPolled($, platform === 'linux' ? LINUX : MAC)
 }
 
 const tick = async ($: EngineInterface): Promise<void> => {
@@ -645,7 +761,10 @@ const APP_NAMES: readonly [RegExp, string][] = [
   [/telegram/i, 'Telegram'],
   [/^chrome\._crx_/i, 'приложение Chrome'],
   [/^msedge\._crx_/i, 'приложение Edge'],
+  [/chromium/i, 'Chromium'],
   [/chrome/i, 'Chrome'],
+  [/brave/i, 'Brave'],
+  [/vivaldi/i, 'Vivaldi'],
   [/msedge/i, 'Edge'],
   [/firefox/i, 'Firefox'],
   [/opera/i, 'Opera'],
@@ -653,10 +772,20 @@ const APP_NAMES: readonly [RegExp, string][] = [
   [/aimp/i, 'AIMP'],
   [/foobar/i, 'foobar2000'],
   [/vlc/i, 'VLC'],
+  [/^mpv/i, 'mpv'],
+  [/rhythmbox/i, 'Rhythmbox'],
+  [/elisa/i, 'Elisa'],
+  [/strawberry/i, 'Strawberry'],
+  [/audacious/i, 'Audacious'],
+  [/^music$/i, 'Музыка'],
 ]
 
 export const appName = (id: string): string =>
-  APP_NAMES.find(([pattern]) => pattern.test(id))?.[1] ?? id.replace(/\.exe$/i, '').replace(/[_!].*$/, '')
+  APP_NAMES.find(([pattern]) => pattern.test(id))?.[1] ??
+  id
+    .replace(/\.exe$/i, '')
+    .replace(/\.instance.*$/, '')
+    .replace(/[_!].*$/, '')
 
 const nowText = (playing: Track | null, failure: string | null): string =>
   failure !== null
@@ -691,11 +820,11 @@ const describe = (element: unknown): string => {
 // Hands a button press to the helper; answers what happened, in words.
 const press = async ($: EngineInterface, command: Command): Promise<string> => {
   const [playing, failure] = await Promise.all([read($, track), read($, error)])
-  if (commandFile === null) return failure === null ? 'Плеер ещё запускается, попробуй через секунду.' : `Ошибка: ${failure}`
+  if (presser === null) return failure === null ? 'Плеер ещё запускается, попробуй через секунду.' : `Ошибка: ${failure}`
   if (playing === null) return 'Сейчас ничего не играет.'
 
   try {
-    await $.fs.write(commandFile, JSON.stringify({ command, app: playing.app, title: playing.title }))
+    await presser(command, playing)
     seen.lastCommand = command
     return command === 'toggle' ? (playing.isPlaying ? COMMAND_ANSWERS.pause : COMMAND_ANSWERS.play) : COMMAND_ANSWERS[command]
   } catch (thrown) {
@@ -733,10 +862,11 @@ const debugText = async ($: EngineInterface): Promise<string> => {
         `сообщено ${Math.round((at - (raw.updatedAt ?? at)) / 1000)} с назад`
   return [
       `now-playing ${VERSION}`,
+    `Система: ${platform === undefined ? '—' : PLATFORM_NAMES[platform]}`,
       `Поверхности сессии: ${surfaces.length === 0 ? 'нет' : surfaces.join(', ')}`,
       summary(chosen),
       nowText(playing, failure),
-      `Источник как его называет Windows: ${playing?.app ?? '—'}`,
+      `Источник как его называет система: ${playing?.app ?? '—'}`,
       `Скрытые источники: ${chosen.hidden.length === 0 ? 'нет' : chosen.hidden.join(', ')}`,
       `Текст песни: ${
         chosen.lyrics === 'off'
@@ -747,7 +877,7 @@ const debugText = async ($: EngineInterface): Promise<string> => {
               `${sung.detail === undefined ? '' : ` (${sung.detail})`}`
       }`,
       '',
-      all.length === 0 ? 'Медиасессии Windows: нет' : 'Медиасессии Windows:',
+      all.length === 0 ? 'Медиасессии: нет' : 'Медиасессии:',
       ...listed,
       '',
       'Полоса над полем ввода:',
@@ -760,7 +890,7 @@ const debugText = async ($: EngineInterface): Promise<string> => {
       `  часы спрашивали время: ${seen.clockAsks} раз`,
   `  эквалайзер: ${
     liveBars(at) === undefined
-      ? 'свои кадры, громкость Windows не читается'
+      ? `свои кадры, громкость не читается${platform === 'windows' ? '' : ' (живой есть только на Windows)'}`
       : `живой, последнее чтение ${Math.round(at - meter.at)} мс назад`
   }`,
       '',
@@ -771,7 +901,7 @@ const debugText = async ($: EngineInterface): Promise<string> => {
       `  последняя команда: ${seen.lastCommand}`,
       `  ответ: ${seen.lastAnswer}`,
       `  ошибка: ${seen.controlFailure}`,
-      `  время от Windows: ${timeline}`,
+      `  время от плеера: ${timeline}`,
   ].join('\n')
 }
 

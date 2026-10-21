@@ -251,7 +251,7 @@ test('apps get readable names', async ($, on) => {
   await clock.settle()
 
   expect((await $.command.run(run(''))).text).toContain('Играет: Lil Peep — Gym Class (приложение Chrome)')
-  expect((await $.command.run(run('debug'))).text).toContain('Windows: Chrome._crx_eikjhbkpemcmdeeeamdpkgabmk')
+  expect((await $.command.run(run('debug'))).text).toContain('система: Chrome._crx_eikjhbkpemcmdeeeamdpkgabmk')
 })
 
 test('an unknown /player word gets the help', async ($, on) => {
@@ -279,7 +279,7 @@ test('/player says when the helper ends without a word', async ($, on) => {
   await clock.settle()
 
   const answer = await $.command.run(run(''))
-  expect(answer.text).toContain('только на Windows')
+  expect(answer.text).toContain('помощник не запустился')
   expect(answer.text).toContain('powershell.exe: not found')
   expect((await $.command.run(run('next'))).text).toContain('Ошибка: помощник не запустился')
 })
