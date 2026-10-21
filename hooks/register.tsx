@@ -9,8 +9,10 @@ const track = atom({ plugin: 'now-playing', key: 'track' } as const, null)
 const settings = atom({ plugin: 'now-playing', key: 'settings' } as const, DEFAULTS)
 const frame = atom({ plugin: 'now-playing', key: 'frame' } as const, 0)
 const error = atom({ plugin: 'now-playing', key: 'error' } as const, null)
+// Session-only trial of drawing the track in the hint line (/player test hint).
+const hintTrial = atom({ plugin: 'now-playing', key: 'hintTrial' } as const, false)
 
-const VERSION = '1.1.2'
+const VERSION = '1.1.3'
 const TOP_PLACES: readonly TopPlace[] = ['off', 'left', 'center', 'right']
 const TEXT_SIZES: readonly TextSize[] = ['small', 'normal']
 const BOTTOM_PLACES: readonly BottomPlace[] = ['off', 'model']
@@ -208,6 +210,9 @@ const seen = {
   bandBelow: '—',
   bandSkipped: '—',
   bandFailure: '—',
+  hintCalls: 0,
+  hintDrawn: 0,
+  hintText: '—',
   panelDrawn: 0,
 }
 
@@ -303,7 +308,21 @@ export const register: Register = on => {
           `  ошибка: ${seen.bandFailure}`,
           '',
           `Панель с кнопками нарисована: ${seen.panelDrawn} раз`,
+          '',
+          `Строка подсказки (опыт ${(await read($, hintTrial)) ? 'включён' : 'выключен'}):`,
+          `  приложение просило нарисовать: ${seen.hintCalls} раз`,
+          `  трек нарисован: ${seen.hintDrawn} раз`,
+          `  что там пишет приложение: ${seen.hintText}`,
         ].join('\n'),
+      }
+    }
+
+    if (words[0] === 'test' && words[1] === 'hint') {
+      const isOn = await update($, hintTrial, was => !was)
+      return {
+        text: isOn
+          ? 'Опыт включён: трек рисуется в строке подсказки. Посмотри, где он появился. Выключить: /player test hint'
+          : 'Опыт выключен.',
       }
     }
 
@@ -355,6 +374,25 @@ export const register: Register = on => {
         {row('Над полем ввода', 'top', TOP_PLACES, TOP_LABELS, chosen.top)}
         {row('Размер текста', 'size', TEXT_SIZES, SIZE_LABELS, chosen.size)}
         {row('Внизу', 'bottom', BOTTOM_PLACES, BOTTOM_LABELS, chosen.bottom)}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    seen.hintCalls += 1
+    seen.hintText = e.props.hint === '' ? '(пусто)' : e.props.hint
+    const [isTrying, playing, at] = await Promise.all([read($, hintTrial), read($, track), read($, frame)])
+
+    if (!isTrying || playing === null) return next(e)
+
+    const line = await next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    seen.hintDrawn += 1
+
+    return (
+      <Box flexDirection="row" gap="sm">
+        {line}
+        <Text dimColor>{lineText(playing, at)}</Text>
       </Box>
     )
   })

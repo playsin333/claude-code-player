@@ -27,6 +27,7 @@ declare module 'claude-code' {
       settings: PlayerSettings
       frame: number
       error: string | null
+      hintTrial: boolean
     }
   }
 }
